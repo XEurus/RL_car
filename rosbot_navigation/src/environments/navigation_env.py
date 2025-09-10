@@ -101,9 +101,9 @@ class ROSbotNavigationEnv(gym.Env):
         # Webots控制器 - 使用兼容性层
         # 允许通过 controller_url 连接到特定的 Webots 实例（外部控制器）
         
-        # 设置最大连接重试次数
-        max_tries = 3
-        retry_delay = 2  # 秒
+        # 设置最大连接重试次数（在并行实例较多时适当增加重试和间隔）
+        max_tries = 5
+        retry_delay = 3  # 秒
         connected = False
         import time
         
@@ -122,6 +122,8 @@ class ROSbotNavigationEnv(gym.Env):
                         # 设置Webots的连接参数
                         os.environ['WEBOTS_SERVER'] = host
                         os.environ['WEBOTS_PORT'] = str(port)
+                        # 同时设置标准的控制器URL，确保选择到正确的机器人（包含?name=...时生效）
+                        os.environ['WEBOTS_CONTROLLER_URL'] = str(controller_url)
                         print(f"   设置连接: {host}:{port}")
                     else:
                         # 其他格式直接设置
@@ -1074,7 +1076,7 @@ class ROSbotNavigationEnv(gym.Env):
                         if robot_name_field:
                             robot_part_name = robot_name_field.getSFString()
 
-                    print(f"检测到有效碰撞！'{robot_part_name}' 与 '{other_node_name}' 在高度 {contact_z_height:.4f}m 处接触。")
+                    # print(f"检测到有效碰撞！'{robot_part_name}' 与 '{other_node_name}' 在高度 {contact_z_height:.4f}m 处接触。")
                     break
 
             except Exception as e:
@@ -1087,17 +1089,17 @@ class ROSbotNavigationEnv(gym.Env):
         current_pos = self._get_sup_position()
         current_distance = np.linalg.norm(current_pos - self.task_info['target_pos'])
         if current_distance < self.success_threshold:
-            print(f"成功到达目标点！距离: {current_distance:.4f}m")
+            # print(f"成功到达目标点！距离: {current_distance:.4f}m")
             return True
         
         # 3. 新增：原地打转终止条件
         if self.reward_functions.is_excessive_spin():
-            print(f"检测到原地打转超过阈值，任务终止。")
+            # print(f"检测到原地打转超过阈值，任务终止。")
             return True
         
         # 4. 超时/步数限制
         if len(self.trajectory) > self.max_steps_per_episode:
-            print("超过最大步数限制，任务终止。")
+            # print("超过最大步数限制，任务终止。")
             return True
             
         return False

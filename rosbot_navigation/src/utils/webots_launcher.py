@@ -16,8 +16,124 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Optional, Tuple
+import threading
+import socket
+import json
+import fcntl
 
 _URL_PATTERN = re.compile(r"url:\s*(?P<url>.+)$")
+
+# 端口扫描与预留配置
+_PORT_SCAN_START = 10000
+_PORT_SCAN_END = 20000
+_PORT_RANGE_WIDTH = 10  # Webots 会占用 base..base+10 的范围
+_PORT_STEP = 50
+_PORT_LOCK_PATH = Path(tempfile.gettempdir()) / 'webots_port_alloc.lock'
+_PORT_RES_PATH = Path(tempfile.gettempdir()) / 'webots_port_reserved.json'
+_START_LOCK_PATH = Path(tempfile.gettempdir()) / 'webots_start_mutex.lock'
+
+
+def _is_port_free(port: int, host: str = '127.0.0.1') -> bool:
+    """检查端口是否空闲（仅TCP）。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def _is_range_free(base_port: int, width: int = _PORT_RANGE_WIDTH) -> bool:
+    """检查 [base_port, base_port+width] 区间的端口是否全部空闲。"""
+    for p in range(base_port, base_port + width + 1):
+        if not _is_port_free(p):
+            return False
+    return True
+
+
+def _load_reservations(now: float, ttl_seconds: int = 180) -> dict:
+    """加载预留端口表，并清理过期预留。"""
+    if not _PORT_RES_PATH.exists():
+        return {}
+    try:
+        data = json.loads(_PORT_RES_PATH.read_text())
+        # 清理过期
+        data = {k: v for k, v in data.items() if (now - float(v)) <= ttl_seconds}
+        return data
+    except Exception:
+        return {}
+
+
+def _save_reservations(data: dict) -> None:
+    try:
+        _PORT_RES_PATH.write_text(json.dumps(data))
+    except Exception:
+        pass
+
+
+def _release_reservation(base_port: int) -> None:
+    """释放已预留的端口区间。"""
+    try:
+        now = time.time()
+        _PORT_LOCK_PATH.touch(exist_ok=True)
+        with open(_PORT_LOCK_PATH, 'a+') as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            reservations = _load_reservations(now)
+            key = str(int(base_port))
+            if key in reservations:
+                reservations.pop(key, None)
+                _save_reservations(reservations)
+            fcntl.flock(lf, fcntl.LOCK_UN)
+    except Exception:
+        pass
+
+
+def _allocate_base_port(instance_id: int) -> int:
+    """分配一个可用的 Webots 基础端口，确保整个 [base, base+10] 区间空闲。
+
+    使用文件锁与预留表避免并发冲突；优先尝试来自环境变量 WEBOTS_BASE_PORT 或
+    基于实例ID的推荐端口；否则扫描端口范围选择第一个可用区间。
+    """
+    preferred_env = os.environ.get('WEBOTS_BASE_PORT')
+    preferred = None
+    if preferred_env:
+        try:
+            preferred = int(preferred_env)
+        except Exception:
+            preferred = None
+
+    # 候选端口生成：优先推荐，再扫描
+    def candidate_bases():
+        # 基于实例ID的推荐，避免密集冲突
+        hint = _PORT_SCAN_START + (instance_id * _PORT_STEP)
+        if hint < _PORT_SCAN_END:
+            yield hint
+        if preferred and _PORT_SCAN_START <= preferred < _PORT_SCAN_END:
+            yield preferred
+        # 常规扫描
+        start = _PORT_SCAN_START + ((instance_id % _PORT_STEP))
+        for base in range(start, _PORT_SCAN_END, _PORT_STEP):
+            yield base
+
+    now = time.time()
+    # 加锁避免并发竞争
+    _PORT_LOCK_PATH.touch(exist_ok=True)
+    with open(_PORT_LOCK_PATH, 'a+') as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        reservations = _load_reservations(now)
+        for base in candidate_bases():
+            if str(base) in reservations:
+                continue
+            if _is_range_free(base):
+                # 预留该端口区间
+                reservations[str(base)] = now
+                _save_reservations(reservations)
+                fcntl.flock(lf, fcntl.LOCK_UN)
+                return base
+        # 如果没有可用端口
+        fcntl.flock(lf, fcntl.LOCK_UN)
+    raise RuntimeError("未找到可用的 Webots 端口区间，请检查是否有大量占用或僵尸进程。")
 
 
 def _find_project_root() -> Path:
@@ -92,6 +208,30 @@ EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/project
     return out_world
 
 
+def _drain_process_output(proc: subprocess.Popen, instance_id: int) -> None:
+    """Drain stdout in a background thread to avoid PIPE buffer blocking.
+
+    When many Webots instances run concurrently and we keep stdout=PIPE to parse
+    the extern controller URL, if we stop reading after we found the URL the
+    child's stdout buffer may fill up and block the Webots process. This helper
+    keeps reading and discarding the remaining output until the process exits.
+    """
+    def _reader():
+        try:
+            if proc.stdout is None:
+                return
+            for line in proc.stdout:
+                # 仅在极端调试时才打印，默认丢弃以避免阻塞
+                # print(f"🪵 实例 {instance_id} 日志: {line.rstrip()}")
+                pass
+        except Exception:
+            # 进程结束或管道关闭时可能抛出异常，忽略即可
+            pass
+
+    t = threading.Thread(target=_reader, name=f"webots-log-drain-{instance_id}", daemon=True)
+    t.start()
+
+
 def start_webots_instance(instance_id: int,
                           world_path: Optional[str] = None,
                           headless: bool = True,
@@ -101,7 +241,8 @@ def start_webots_instance(instance_id: int,
                           minimize: bool = False,
                           stdout: bool = False,
                           stderr: bool = False,
-                          timeout_seconds: int = 120) -> Tuple[subprocess.Popen, str]:
+                          timeout_seconds: int = 120,
+                          _retry_count: int = 0) -> Tuple[subprocess.Popen, str]:
     """
     启动一个 Webots 实例并返回 (进程句柄, extern controller URL)。
     
@@ -146,8 +287,13 @@ def start_webots_instance(instance_id: int,
     if headless or minimize:
         cmd += ['--minimize']
     
-    # 为每个实例分配不同的端口（避免冲突）- 使用更大的间隔以避免端口扫描冲突
-    port = 10000 + (instance_id * 100)  # 每个实例间隔100，给足缓冲
+    # 为每个实例安全分配端口（先检测可用区间，避免冲突）
+    try:
+        port = _allocate_base_port(instance_id)
+    except Exception as e:
+        print(f"❌ 端口分配失败: {e}")
+        # 兜底：退回到旧逻辑，但可能冲突
+        port = 10000 + (instance_id * 100)
     cmd += [f'--port={port}']
     
     # 输出重定向选项
@@ -165,6 +311,17 @@ def start_webots_instance(instance_id: int,
     # 添加环境变量禁用GPU渲染，避免OpenGL问题
     env['LIBGL_ALWAYS_SOFTWARE'] = '1'  # 强制使用软件渲染
     env['WEBOTS_DISABLE_GPU'] = '1'
+    # 重要：不要使用 offscreen 平台（默认镜像通常没有该插件），在 xvfb-run 下使用 xcb 即可
+    env['QT_QPA_PLATFORM'] = 'xcb'
+    # 清理可能由 OpenCV 注入的插件路径，避免指向 cv2/qt/plugins 导致找不到 xcb
+    if 'QT_PLUGIN_PATH' in env and 'cv2' in env['QT_PLUGIN_PATH']:
+        env.pop('QT_PLUGIN_PATH', None)
+    # 在 root/headless 环境下，禁用 QtWebEngine 沙盒
+    env['QTWEBENGINE_DISABLE_SANDBOX'] = '1'
+    env['QTWEBENGINE_CHROMIUM_FLAGS'] = '--no-sandbox'
+    # 尽量禁用 Webots 的 web 接口以减少对 QtWebEngine 的依赖
+    env['WEBOTS_DISABLE_WEB_INTERFACE'] = '1'
+    env.setdefault('USER', os.environ.get('USER', 'default'))
 
     # 打印详细的启动信息和启用的参数
     print(f"🚀 启动 Webots 实例 {instance_id}:")
@@ -177,112 +334,147 @@ def start_webots_instance(instance_id: int,
     print(f"   - 最小化: {headless or minimize}")
     print(f"   - 完整命令: {' '.join(cmd)}")
     
-    # 启动进程
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        universal_newlines=True,
-        env=env
-    )
+    # 启动进程（使用全局启动互斥锁，避免同时创建多个Webots导致系统资源/Qt冲突）
+    _START_LOCK_PATH.touch(exist_ok=True)
+    with open(_START_LOCK_PATH, 'a+') as start_lock:
+        fcntl.flock(start_lock, fcntl.LOCK_EX)
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
+            env=env
+        )
 
-    # 解析 extern URL
-    url: Optional[str] = None
-    start_time = time.time()
-    assert proc.stdout is not None
-    
-    print(f"⏳ 等待 Webots 实例 {instance_id} 输出 extern controller URL...")
-    
-    all_output = []  # 收集所有输出用于调试
-    while True:
-        if (time.time() - start_time) > timeout_seconds:
-            print(f"⚠️ 实例 {instance_id} 超时！使用默认URL")
-            # 使用默认URL（端口基于instance_id）
-            port = 10000 + (instance_id * 100)
-            url = f"tcp://localhost:{port}?name=rosbot"
-            print(f"✅ 实例 {instance_id} 使用默认URL: {url}")
-            break
-            
-        line = proc.stdout.readline()
-        if not line:
-            # 进程可能已结束
-            if proc.poll() is not None:
-                print(f"❌ Webots 实例 {instance_id} 进程提前退出，返回码 {proc.returncode}")
-                print("最后的输出：")
-                for output_line in all_output[-5:]:
-                    print(f"   📄 {output_line.rstrip()}")
-                raise RuntimeError(f"Webots 进程提前退出，返回码 {proc.returncode}")
-            time.sleep(0.05)
-            continue
-            
-        all_output.append(line)
-        print(f"🔍 实例 {instance_id} 输出: {line.rstrip()}")
+        # 解析 extern URL（持有启动锁直至解析完成/失败）
+        url: Optional[str] = None
+        start_time = time.time()
+        assert proc.stdout is not None
         
-        # 查找 URL - 改进正则表达式
-        m = _URL_PATTERN.search(line)
-        if m:
-            url = m.group('url').strip()
-            print(f"✅ 实例 {instance_id} 找到URL (正则): {url}")
-            break
-            
-        # 兼容其他格式：包含 'extern controller' 且有 'ipc://' 或 'tcp://'
-        if 'extern controller' in line and ('ipc://' in line or 'tcp://' in line):
-            # 简易提取
-            if 'url:' in line:
-                parts = line.strip().split('url:')
-                if len(parts) >= 2:
-                    url = parts[-1].strip()
-                    print(f"✅ 实例 {instance_id} 找到URL (分割): {url}")
-                    break
-            else:
-                # 直接查找 ipc:// 或 tcp://
-                if 'ipc://' in line:
-                    start_idx = line.find('ipc://')
-                    url_part = line[start_idx:].strip()
-                    url = url_part.split()[0]  # 取第一个词
-                    print(f"✅ 实例 {instance_id} 找到URL (直接): {url}")
-                    break
-                elif 'tcp://' in line:
-                    start_idx = line.find('tcp://')
-                    url_part = line[start_idx:].strip()
-                    url = url_part.split()[0]  # 取第一个词
-                    print(f"✅ 实例 {instance_id} 找到URL (直接): {url}")
-                    break
+        print(f"⏳ 等待 Webots 实例 {instance_id} 输出 extern controller URL...")
         
-        # 检查标准的 extern controller 等待消息 - 支持更多模式
-        if ('extern controller' in line or 'extern controller:' in line) and ('Waiting for' in line or 'waiting for' in line):
-            # 首先尝试匹配端口号
-            import re
-            port_match = re.search(r'port (\d+)', line)
-            if port_match:
-                port = port_match.group(1)
-                # 构造连接URL (使用本地TCP连接)
-                url = f"tcp://localhost:{port}"
-                print(f"✅ 实例 {instance_id} 找到端口 (标准格式): {url}")
+        all_output = []  # 收集所有输出用于调试
+        conflict_detected = False
+        while True:
+            if (time.time() - start_time) > timeout_seconds:
+                print(f"⚠️ 实例 {instance_id} 超时！使用默认URL")
+                # 使用默认URL（端口基于instance_id）
+                port = 10000 + (instance_id * 100)
+                url = f"tcp://localhost:{port}?name=rosbot"
+                print(f"✅ 实例 {instance_id} 使用默认URL: {url}")
                 break
+                
+            line = proc.stdout.readline()
+            if not line:
+                # 进程可能已结束
+                if proc.poll() is not None:
+                    print(f"❌ Webots 实例 {instance_id} 进程提前退出，返回码 {proc.returncode}")
+                    print("最后的输出：")
+                    for output_line in all_output[-5:]:
+                        print(f"   📄 {output_line.rstrip()}")
+                    # 如果检测到端口冲突或返回码非零，尝试重试
+                    if conflict_detected or (_retry_count < 2 and proc.returncode != 0):
+                        try:
+                            stop_webots_instance(proc)
+                        except Exception:
+                            pass
+                        _release_reservation(port)
+                        print(f"🔁 重新尝试启动 Webots 实例 {instance_id}，更换端口 (重试 {_retry_count+1})")
+                        return start_webots_instance(
+                            instance_id=instance_id,
+                            world_path=str(base_world),
+                            headless=headless,
+                            fast_mode=fast_mode,
+                            no_rendering=no_rendering,
+                            batch=batch,
+                            minimize=minimize,
+                            stdout=stdout,
+                            stderr=stderr,
+                            timeout_seconds=timeout_seconds,
+                            _retry_count=_retry_count + 1,
+                        )
+                    raise RuntimeError(f"Webots 进程提前退出，返回码 {proc.returncode}")
+                time.sleep(0.05)
+                continue
+                
+            all_output.append(line)
+            print(f"🔍 实例 {instance_id} 输出: {line.rstrip()}")
+            # 端口冲突模式检测
+            if ('failed to open TCP server' in line) or ('Could not listen to extern controllers' in line and ('Giving up.' in line or 'Using port' in line)):
+                conflict_detected = True
             
-            # 通用解析：尝试提取名称为'rosbot'的机器人标识
-            if 'rosbot' in line:
-                robot_match = re.search(r'robot named [\'"]([^\'"]+)[\'"]', line)
-                if robot_match:
-                    robot_name = robot_match.group(1)
-                    # 从启动参数中获取端口
-                    robot_port = 10000 + (instance_id * 100)
-                    url = f"tcp://localhost:{robot_port}?name={robot_name}"
-                    print(f"✅ 实例 {instance_id} 使用机器人名称构建URL: {url}")
+            # 查找 URL - 改进正则表达式
+            m = _URL_PATTERN.search(line)
+            if m:
+                url = m.group('url').strip()
+                print(f"✅ 实例 {instance_id} 找到URL (正则): {url}")
+                break
+                
+            # 兼容其他格式：包含 'extern controller' 且有 'ipc://' 或 'tcp://'
+            if 'extern controller' in line and ('ipc://' in line or 'tcp://' in line):
+                # 简易提取
+                if 'url:' in line:
+                    parts = line.strip().split('url:')
+                    if len(parts) >= 2:
+                        url = parts[-1].strip()
+                        print(f"✅ 实例 {instance_id} 找到URL (分割): {url}")
+                        break
+                else:
+                    # 直接查找 ipc:// 或 tcp://
+                    if 'ipc://' in line:
+                        start_idx = line.find('ipc://')
+                        url_part = line[start_idx:].strip()
+                        url = url_part.split()[0]  # 取第一个词
+                        print(f"✅ 实例 {instance_id} 找到URL (直接): {url}")
+                        break
+                    elif 'tcp://' in line:
+                        start_idx = line.find('tcp://')
+                        url_part = line[start_idx:].strip()
+                        url = url_part.split()[0]  # 取第一个词
+                        print(f"✅ 实例 {instance_id} 找到URL (直接): {url}")
+                        break
+            
+            # 检查标准的 extern controller 等待消息 - 支持更多模式
+            if ('extern controller' in line or 'extern controller:' in line) and ('Waiting for' in line or 'waiting for' in line):
+                # 首先尝试匹配端口号
+                import re
+                port_match = re.search(r'port (\d+)', line)
+                if port_match:
+                    port = port_match.group(1)
+                    # 构造连接URL (使用本地TCP连接)
+                    url = f"tcp://localhost:{port}"
+                    print(f"✅ 实例 {instance_id} 找到端口 (标准格式): {url}")
                     break
+                
+                # 通用解析：尝试提取名称为'rosbot'的机器人标识
+                if 'rosbot' in line:
+                    robot_match = re.search(r"robot named ['\"]([^'\"]+)['\"]", line)
+                    if robot_match:
+                        robot_name = robot_match.group(1)
+                        # 从启动参数中获取端口
+                        robot_port = 10000 + (instance_id * 100)
+                        url = f"tcp://localhost:{robot_port}?name={robot_name}"
+                        print(f"✅ 实例 {instance_id} 使用机器人名称构建URL: {url}")
+                        break
+        
+        if not url:
+            # 后备方案：生成一个可能有效的URL
+            # 使用已分配的基础端口作为回退
+            try:
+                base_port = port if isinstance(port, int) else int(port)
+            except Exception:
+                base_port = 10000 + (instance_id * 100)
+            port = base_port
+            url = f"tcp://localhost:{port}?name=rosbot"
+            print(f"⚠️ 实例 {instance_id} 未能解析到 extern controller URL，使用后备URL: {url}")
+            print("最近10行输出：")
+            for output_line in all_output[-10:]:
+                print(f"   📄 {output_line.rstrip()}")
 
-    if not url:
-        # 后备方案：生成一个可能有效的URL
-        port = 10000 + (instance_id * 100)
-        url = f"tcp://localhost:{port}?name=rosbot"
-        print(f"⚠️ 实例 {instance_id} 未能解析到 extern controller URL，使用后备URL: {url}")
-        print("最近10行输出：")
-        for output_line in all_output[-10:]:
-            print(f"   📄 {output_line.rstrip()}")
-        # 继续使用此URL尝试连接，而不是失败
+    # 重要：在返回前启动后台线程持续读取 stdout，避免缓冲区填满导致 Webots 阻塞
+    _drain_process_output(proc, instance_id)
 
     print(f"🎯 实例 {instance_id} extern controller URL: {url}")
     return proc, url
@@ -291,6 +483,13 @@ def start_webots_instance(instance_id: int,
 def stop_webots_instance(proc: subprocess.Popen, wait_seconds: int = 5) -> None:
     """停止 Webots 实例。"""
     try:
+        # 先关闭 stdout，解除可能的管道阻塞
+        try:
+            if getattr(proc, 'stdout', None):
+                proc.stdout.close()
+        except Exception:
+            pass
+
         if proc.poll() is None:
             proc.terminate()
             try:

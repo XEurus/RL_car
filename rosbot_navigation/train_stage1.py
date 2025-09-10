@@ -184,6 +184,9 @@ def setup_for_cargo_type(cargo_type: str, total_steps: int, device: str = 'auto'
         return _init
 
     if args and getattr(args, 'num_envs', 1) > 1:
+        # 使用 SubprocVecEnv 确保每个环境在独立的进程中运行，
+        # 避免同一进程创建多个 Webots Supervisor 导致的错误。
+        # Webots 启动器内部已使用全局互斥锁串行化启动，避免并发启动冲突。
         env = SubprocVecEnv([make_env_fn(i) for i in range(int(args.num_envs))])
     else:
         # 单实例（不需要 SubprocVecEnv）
@@ -279,10 +282,10 @@ def train_single_cargo_model(cargo_type: str, total_steps: int, model_save_path:
         if args:
             # 使用命令行解析器的默认值
             algo_params = {
-                "learning_rate": getattr(args, 'learning_rate', 3e-4),
-                "buffer_size": getattr(args, 'buffer_size', 50000),
+                "learning_rate": getattr(args, 'learning_rate', 1e-3),
+                "buffer_size": getattr(args, 'buffer_size', 100000),
                 "batch_size": getattr(args, 'batch_size', 256),
-                "learning_starts": getattr(args, 'learning_starts', 1000),
+                "learning_starts": getattr(args, 'learning_starts', 10000),
                 "gamma": getattr(args, 'gamma', 0.98),
                 "tau": getattr(args, 'tau', 0.005),
                 "gradient_steps": getattr(args, 'gradient_steps', 1),
@@ -396,8 +399,8 @@ def main():
     parser.add_argument('--device', type=str, default='cuda', 
                        help='计算设备 (e.g., "cpu", "cuda", "auto")')
     # 并行/实例与Webots相关参数
-    parser.add_argument('--num_envs', type=int, default=4, help='并行环境数量（>1启用多进程并行）')
-    parser.add_argument('--world', type=str, default='/root/workspace/RL_car2/warehouse/worlds/warehouse4.wbt', help='Webots world 文件路径')
+    parser.add_argument('--num_envs', type=int, default=8, help='并行环境数量（>1启用多进程并行）')
+    parser.add_argument('--world', type=str, default='/root/workspace/RL_car2/warehouse/worlds/warehouse2.wbt', help='Webots world 文件路径')
     parser.add_argument('--headless', type=bool,default=True, help='以无渲染/批处理模式启动 Webots')
     parser.add_argument('--fast_mode', type=bool,default=True, help='使用Webots FAST模式')
     parser.add_argument('--no-rendering',type=bool,default=True, help='渲染模式')
@@ -408,8 +411,8 @@ def main():
     
     # TD3算法相关参数
     parser.add_argument('--learning_rate', type=float, default=3e-4, help='学习率')
-    parser.add_argument('--buffer_size', type=int, default=50000, help='经验回放缓冲区大小')
-    parser.add_argument('--learning_starts', type=int, default=100, help='预热步数，开始学习前收集的样本数量')
+    parser.add_argument('--buffer_size', type=int, default=100000, help='经验回放缓冲区大小')
+    parser.add_argument('--learning_starts', type=int, default=10000, help='预热步数，开始学习前收集的样本数量')
     parser.add_argument('--batch_size', type=int, default=256, help='批处理大小')
     parser.add_argument('--gamma', type=float, default=0.98, help='折扣因子')
     parser.add_argument('--tau', type=float, default=0.005, help='目标网络软更新系数')
