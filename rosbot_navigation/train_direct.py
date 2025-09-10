@@ -10,6 +10,7 @@ import math
 from pathlib import Path
 import time
 import json
+import argparse
 
 # 添加路径
 import sys
@@ -366,30 +367,38 @@ class SimpleNavEnv(gym.Env):
         
         return False
 
-def train_single_cargo(cargo_type='normal', steps=10000):
+def train_single_cargo(cargo_type='normal', steps=10000, args=None):
     """训练单一货物类型"""
     print(f"🚦 开始训练 {cargo_type} 类型...")
     
     # 创建环境
     env = SimpleNavEnv(cargo_type=cargo_type)
     
-    # 使用标准TD3
+    # 使用标准TD3 - 使用getattr安全获取参数
     from stable_baselines3 import TD3
     model = TD3(
         policy='MlpPolicy',
         env=env,
-        learning_rate=3e-4,
-        buffer_size=100000,
-        learning_starts=1000,
-        batch_size=256,
-        gamma=0.99,
-        tau=0.005,
-        policy_delay=2,
-        target_policy_noise=0.2,
-        target_noise_clip=0.5,
+        learning_rate=getattr(args, 'learning_rate', 3e-4) if args else 3e-4,
+        buffer_size=getattr(args, 'buffer_size', 100000) if args else 100000,
+        learning_starts=getattr(args, 'learning_starts', 1000) if args else 1000,
+        batch_size=getattr(args, 'batch_size', 256) if args else 256,
+        gamma=getattr(args, 'gamma', 0.99) if args else 0.99,
+        tau=getattr(args, 'tau', 0.005) if args else 0.005,
+        policy_delay=getattr(args, 'policy_delay', 2) if args else 2,
+        target_policy_noise=getattr(args, 'target_noise', 0.2) if args else 0.2,
+        target_noise_clip=getattr(args, 'noise_clip', 0.5) if args else 0.5,
         verbose=1,
         tensorboard_log=f"./logs/simple_{cargo_type}"
     )
+    
+    # 打印关键参数
+    print("\n📊 训练参数:")
+    print(f"  - 学习率: {getattr(args, 'learning_rate', 3e-4) if args else 3e-4}")
+    print(f"  - 缓冲区大小: {getattr(args, 'buffer_size', 100000) if args else 100000}")
+    print(f"  - 批处理大小: {getattr(args, 'batch_size', 256) if args else 256}")
+    print(f"  - 预热步数: {getattr(args, 'learning_starts', 1000) if args else 1000}")
+    print(f"  - 折扣因子: {getattr(args, 'gamma', 0.99) if args else 0.99}")
     
     start_time = time.time()
     
@@ -457,7 +466,23 @@ def test_model(model, env, cargo_type='normal', episodes=3):
 
 def main():
     """主函数 - 训练所有货物类型"""
+    parser = argparse.ArgumentParser(description='直接训练 - 简化环境')
+    parser.add_argument('--num_envs', type=int, default=1, help='并行环境数量（Dummy/Subproc）')
+    parser.add_argument('--seed', type=int, default=42, help='随机种子')
     
+    # TD3算法相关参数
+    parser.add_argument('--learning_rate', type=float, default=3e-4, help='学习率')
+    parser.add_argument('--buffer_size', type=int, default=100000, help='经验回放缓冲区大小')
+    parser.add_argument('--learning_starts', type=int, default=1000, help='预热步数，开始学习前收集的样本数量')
+    parser.add_argument('--batch_size', type=int, default=256, help='批处理大小')
+    parser.add_argument('--gamma', type=float, default=0.99, help='折扣因子')
+    parser.add_argument('--tau', type=float, default=0.005, help='目标网络软更新系数')
+    parser.add_argument('--policy_delay', type=int, default=2, help='策略延迟更新步数')
+    parser.add_argument('--target_noise', type=float, default=0.2, help='目标策略噪声')
+    parser.add_argument('--noise_clip', type=float, default=0.5, help='噪声裁剪范围')
+    
+    args = parser.parse_args()
+
     print("="*70)
     print("🚀 ROSbot导航训练系统 - 直接版本")
     print("="*70)
@@ -479,7 +504,7 @@ def main():
         print('='*50)
         
         # 训练模型
-        model, env, model_path = train_single_cargo(cargo_type, config['steps'])
+        model, env, model_path = train_single_cargo(cargo_type, config['steps'], args=args)
         
         # 测试模型
         test_results = test_model(model, env, cargo_type)

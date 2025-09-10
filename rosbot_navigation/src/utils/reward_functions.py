@@ -80,7 +80,7 @@ class RewardFunctions:
         # 1) 碰撞惩罚（强惩罚）
         try:
             if env_state['detect_collision_simple']():
-                rewards['collision_penalty'] = -100.0
+                rewards['collision_penalty'] = -200.0
         except Exception:
             pass
 
@@ -179,7 +179,7 @@ class RewardFunctions:
 
         # 如果累计旋转超过阈值，给予一个惩罚
         if self.total_rotation_in_place > self.spin_termination_threshold:
-             rewards['excessive_spin_penalty'] = -500.0
+             rewards['excessive_spin_penalty'] = -800.0
              
         # 早期原地打转检测：渐进性惩罚
         if self.same_spot_steps > 3:  # 原地停留超过3步开始惩罚

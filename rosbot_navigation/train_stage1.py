@@ -20,6 +20,9 @@ import mlflow.pytorch
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.results_plotter import load_results, ts2xy
+from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
+
+from src.utils.webots_launcher import start_webots_instance, attach_process_cleanup_to_env
 
 
 class MlflowCallback(BaseCallback):
@@ -142,7 +145,7 @@ class ProgressLoggingCallback(BaseCallback):
         return True
 
 
-def setup_for_cargo_type(cargo_type: str, total_steps: int, device: str = 'auto'):
+def setup_for_cargo_type(cargo_type: str, total_steps: int, device: str = 'auto', args: argparse.Namespace = None):
     """为特定货物类型设置训练"""
     
     print(f"\n=== 开始训练 {cargo_type} 货物导航模型 ===")
@@ -151,29 +154,60 @@ def setup_for_cargo_type(cargo_type: str, total_steps: int, device: str = 'auto'
     print(f"动作空间: 2维连续 [线速度, 角速度]")
     print(f"使用AMCL定位: 800粒子数")
     
-    # 创建环境
-    env = ROSbotNavigationEnv(cargo_type=cargo_type)
-    env = Monitor(env)  # 包装成监视环境
+    # 创建环境（支持多实例并行）
+    def make_env_fn(rank: int):
+        def _init():
+            # 启动独立 Webots 实例（headless/fast）并获取 extern URL
+            # 启动Webots实例并传递所有相关命令行参数
+            proc, url = start_webots_instance(
+                instance_id=rank,
+                world_path=getattr(args, 'world', None) if args else None,
+                headless=getattr(args, 'headless', False) if args else False,
+                fast_mode=getattr(args, 'fast_mode', True) if args else True,
+                no_rendering=getattr(args, 'no_rendering', False) if args else False,
+                batch=getattr(args, 'batch', False) if args else False,
+                minimize=getattr(args, 'minimize', False) if args else False,
+                stdout=getattr(args, 'stdout', False) if args else False,
+                stderr=getattr(args, 'stderr', False) if args else False
+            )
+            # 传入 controller_url 以连接到对应实例
+            env_i = ROSbotNavigationEnv(
+                cargo_type=cargo_type,
+                instance_id=rank,
+                controller_url=url,
+                fast_mode=(args.fast_mode if args else True),
+                control_period_ms=(args.control_period_ms if args else 200)
+            )
+            # 关闭时杀掉 Webots 进程
+            attach_process_cleanup_to_env(env_i, proc)
+            return Monitor(env_i)
+        return _init
+
+    if args and getattr(args, 'num_envs', 1) > 1:
+        env = SubprocVecEnv([make_env_fn(i) for i in range(int(args.num_envs))])
+    else:
+        # 单实例（不需要 SubprocVecEnv）
+        env = make_env_fn(0)()
     
     # 课程学习配置
     from src.localization.amcl_localizer import UncertaintyCurriculumTraining
     uncertainty_curriculum = UncertaintyCurriculumTraining()
     
-    # 创建改进的TD3模型
+    # 创建改进的TD3模型 - 使用getattr安全获取参数，确保命令行参数生效
     model = ImprovedTD3(
         "MlpPolicy",
         env,
-        learning_rate=3e-4,
-        buffer_size=500000,
-        learning_starts=10000,
-        batch_size=2560,
-        gamma=0.99,
-        tau=0.005,
-        gradient_steps=1,
-        train_freq=1,
-        policy_delay=2,
-        target_policy_noise=0.2,
-        target_noise_clip=0.5,
+        learning_rate=getattr(args, 'learning_rate', 3e-4) if args else 3e-4,
+        buffer_size=getattr(args, 'buffer_size', 50000) if args else 50000,
+        learning_starts=getattr(args, 'learning_starts', 1000) if args else 1000,
+        batch_size=getattr(args, 'batch_size', 256) if args else 256,
+        gamma=getattr(args, 'gamma', 0.98) if args else 0.98,
+        tau=getattr(args, 'tau', 0.005) if args else 0.005,
+        gradient_steps=getattr(args, 'gradient_steps', 1) if args else 1,
+        train_freq=getattr(args, 'train_freq', 1) if args else 1,
+        policy_delay=getattr(args, 'policy_delay', 2) if args else 2,
+        target_policy_noise=getattr(args, 'target_noise', 0.2) if args else 0.2,
+        target_noise_clip=getattr(args, 'noise_clip', 0.5) if args else 0.5,
         verbose=1,
         tensorboard_log=None,
         device=device,
@@ -221,7 +255,7 @@ def create_callbacks(env, uncertainty_curriculum, cargo_type: str):
     return callbacks
 
 
-def train_single_cargo_model(cargo_type: str, total_steps: int, model_save_path: str, device: str = 'auto'):
+def train_single_cargo_model(cargo_type: str, total_steps: int, model_save_path: str, device: str = 'auto', args: argparse.Namespace = None):
     """训练单个货物类型模型"""
     
     # 创建MLflow实验
@@ -230,25 +264,59 @@ def train_single_cargo_model(cargo_type: str, total_steps: int, model_save_path:
     
     with mlflow.start_run(run_name=f"training_{cargo_type}_{total_steps}"):
         
-        # 记录实验参数
-        mlflow.log_params({
+        # 记录实验参数 - 使用安全的getattr确保命令行参数有效
+        params_dict = {
             "algorithm": "TD3",
             "cargo_type": cargo_type,
             "total_steps": total_steps,
             "state_dim": 42,
             "action_dim": 2,
             "amcl_particles": 800,
-            "learning_rate": 3e-4,
-            "buffer_size": 500000,
-            "batch_size": 256,
-            "policy_delay": 2,
-            "gamma": 0.99,
-            "tau": 0.005,
-            "device": device
-        })
+            "device": device,
+        }
+        
+        # 安全获取所有算法参数并添加到记录中
+        if args:
+            # 使用命令行解析器的默认值
+            algo_params = {
+                "learning_rate": getattr(args, 'learning_rate', 3e-4),
+                "buffer_size": getattr(args, 'buffer_size', 50000),
+                "batch_size": getattr(args, 'batch_size', 256),
+                "learning_starts": getattr(args, 'learning_starts', 1000),
+                "gamma": getattr(args, 'gamma', 0.98),
+                "tau": getattr(args, 'tau', 0.005),
+                "gradient_steps": getattr(args, 'gradient_steps', 1),
+                "train_freq": getattr(args, 'train_freq', 1),
+                "policy_delay": getattr(args, 'policy_delay', 2),
+                "target_noise": getattr(args, 'target_noise', 0.2),
+                "noise_clip": getattr(args, 'noise_clip', 0.5),
+                "num_envs": getattr(args, 'num_envs', 4)
+            }
+            params_dict.update(algo_params)
+            
+            # 记录Webots相关参数
+            webots_params = {
+                "headless": getattr(args, 'headless', False),
+                "fast_mode": getattr(args, 'fast_mode', False),
+                "control_period_ms": getattr(args, 'control_period_ms', 200),
+                "seed": getattr(args, 'seed', 0)
+            }
+            params_dict.update(webots_params)
+            
+        # 记录所有参数
+        mlflow.log_params(params_dict)
+        
+        # 打印关键训练参数
+        print("\n📊 训练参数:")
+        print(f"  - 学习率: {params_dict.get('learning_rate')}")
+        print(f"  - 缓冲区大小: {params_dict.get('buffer_size')}")
+        print(f"  - 批处理大小: {params_dict.get('batch_size')}")
+        print(f"  - 预热步数: {params_dict.get('learning_starts')}")
+        print(f"  - 折扣因子: {params_dict.get('gamma')}")
+        print(f"  - 并行环境数: {params_dict.get('num_envs')}")
         
         # 设置训练环境
-        model, env, uncertainty_curriculum = setup_for_cargo_type(cargo_type, total_steps, device=device)
+        model, env, uncertainty_curriculum = setup_for_cargo_type(cargo_type, total_steps, device=device, args=args)
         
         # 创建回调
         callbacks = create_callbacks(env, uncertainty_curriculum, cargo_type)
@@ -319,7 +387,7 @@ def main():
     parser.add_argument('--cargo_type', type=str, default='normal', 
                        choices=['normal', 'fragile', 'dangerous'],
                        help='货物类型')
-    parser.add_argument('--total_steps', type=int, default=500000,
+    parser.add_argument('--total_steps', type=int, default=50000,
                        help='总训练步数')
     parser.add_argument('--model_path', type=str, default=None,
                        help='模型保存路径')
@@ -327,6 +395,29 @@ def main():
                        help='调试模式')
     parser.add_argument('--device', type=str, default='cuda', 
                        help='计算设备 (e.g., "cpu", "cuda", "auto")')
+    # 并行/实例与Webots相关参数
+    parser.add_argument('--num_envs', type=int, default=4, help='并行环境数量（>1启用多进程并行）')
+    parser.add_argument('--world', type=str, default='/root/workspace/RL_car2/warehouse/worlds/warehouse4.wbt', help='Webots world 文件路径')
+    parser.add_argument('--headless', type=bool,default=True, help='以无渲染/批处理模式启动 Webots')
+    parser.add_argument('--fast_mode', type=bool,default=True, help='使用Webots FAST模式')
+    parser.add_argument('--no-rendering',type=bool,default=True, help='渲染模式')
+    parser.add_argument('--batch', type=bool,default=True, help='批处理模式')
+    parser.add_argument('--minimize', type=bool,default=True, help='最小化模式')
+    parser.add_argument('--control_period_ms', type=int, default=200, help='控制周期(ms)，用于减少控制往返')
+    parser.add_argument('--seed', type=int, default=0, help='随机种子')
+    
+    # TD3算法相关参数
+    parser.add_argument('--learning_rate', type=float, default=3e-4, help='学习率')
+    parser.add_argument('--buffer_size', type=int, default=50000, help='经验回放缓冲区大小')
+    parser.add_argument('--learning_starts', type=int, default=100, help='预热步数，开始学习前收集的样本数量')
+    parser.add_argument('--batch_size', type=int, default=256, help='批处理大小')
+    parser.add_argument('--gamma', type=float, default=0.98, help='折扣因子')
+    parser.add_argument('--tau', type=float, default=0.005, help='目标网络软更新系数')
+    parser.add_argument('--gradient_steps', type=int, default=1, help='每步梯度更新次数')
+    parser.add_argument('--train_freq', type=int, default=1, help='训练频率')
+    parser.add_argument('--policy_delay', type=int, default=2, help='策略延迟更新步数')
+    parser.add_argument('--target_noise', type=float, default=0.2, help='目标策略噪声')
+    parser.add_argument('--noise_clip', type=float, default=0.5, help='噪声裁剪范围')
     
     args = parser.parse_args()
     
@@ -351,6 +442,16 @@ def main():
     print(f"总步数: {args.total_steps}")
     print(f"模型保存: {model_path}")
     print(f"状态空间: 42维")
+    print(f"{'='*60}")
+    
+    # 显示关键训练参数 - 让用户确认参数已生效
+    print(f"\n📋 已配置的训练参数:")
+    print(f"  🧠 学习率: {args.learning_rate}")
+    print(f"  📦 缓冲区大小: {args.buffer_size}")
+    print(f"  🔥 预热步数: {args.learning_starts}")
+    print(f"  📊 批处理大小: {args.batch_size}")
+    print(f"  🔄 并行环境数: {args.num_envs}")
+    print(f"  ⏱️ 控制周期: {args.control_period_ms} ms")
     print(f"{'='*60}\n")
     
     try:
@@ -358,7 +459,8 @@ def main():
             cargo_type=args.cargo_type,
             total_steps=args.total_steps,
             model_save_path=model_path,
-            device=args.device
+            device=args.device,
+            args=args
         )
         
         print(f"\n训练完成！模型保存到: {model_path}")

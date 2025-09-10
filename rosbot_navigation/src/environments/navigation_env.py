@@ -7,7 +7,8 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import math
-from typing import Dict, Tuple, List
+import os
+from typing import Dict, Tuple, List, Optional
 from collections import deque
 
 from ..localization.amcl_localizer import AMCLLocalizer
@@ -31,12 +32,19 @@ class ROSbotNavigationEnv(gym.Env):
     动作空间：连续2维 [线速度, 角速度]
     """
     
-    def __init__(self, cargo_type: str = 'normal'):
+    def __init__(self, 
+                 cargo_type: str = 'normal', 
+                 instance_id: Optional[int] = None,
+                 controller_url: Optional[str] = None,
+                 fast_mode: bool = True,
+                 control_period_ms: int = 200):
         super(ROSbotNavigationEnv, self).__init__()
         
         # 货物类型
         self.cargo_type = cargo_type
         self.is_training = True
+        self.instance_id = instance_id if instance_id is not None else 0
+        self.control_period_ms = int(control_period_ms) if control_period_ms and control_period_ms > 0 else 200
         
         # 启用初始朝向目标
         self._rotate_to_target_on_reset = True
@@ -91,11 +99,64 @@ class ROSbotNavigationEnv(gym.Env):
         )
         
         # Webots控制器 - 使用兼容性层
-
-        self.robot = Supervisor()
-        self.supervisor = self.robot
+        # 允许通过 controller_url 连接到特定的 Webots 实例（外部控制器）
+        
+        # 设置最大连接重试次数
+        max_tries = 3
+        retry_delay = 2  # 秒
+        connected = False
+        import time
+        
+        for try_num in range(max_tries):
+            try:
+                if controller_url:
+                    print(f"🔌 实例 {self.instance_id} 连接到 Webots ({try_num+1}/{max_tries}): {controller_url}")
+                    # 解析URL并设置环境变量
+                    if controller_url.startswith('tcp://'):
+                        # TCP连接格式：tcp://localhost:1234
+                        import urllib.parse
+                        parsed = urllib.parse.urlparse(controller_url)
+                        host = parsed.hostname or 'localhost'
+                        port = parsed.port or 10000 + (self.instance_id * 100)
+                        
+                        # 设置Webots的连接参数
+                        os.environ['WEBOTS_SERVER'] = host
+                        os.environ['WEBOTS_PORT'] = str(port)
+                        print(f"   设置连接: {host}:{port}")
+                    else:
+                        # 其他格式直接设置
+                        os.environ['WEBOTS_CONTROLLER_URL'] = str(controller_url)
+                else:
+                    print(f"🔌 实例 {self.instance_id} 使用默认 Webots 连接 ({try_num+1}/{max_tries})")
+                
+                print(f"🤖 实例 {self.instance_id} 初始化 Supervisor...")
+                self.robot = Supervisor()
+                self.supervisor = self.robot
+                print(f"✅ 实例 {self.instance_id} Supervisor 初始化成功")
+                connected = True
+                break
+                
+            except Exception as e:
+                print(f"⚠️ 实例 {self.instance_id} 连接失败 ({try_num+1}/{max_tries}): {e}")
+                if try_num < max_tries - 1:
+                    print(f"⏳ 等待 {retry_delay} 秒后重试...")
+                    time.sleep(retry_delay)
+                    # 尝试更改URL格式
+                    if controller_url and '?name=' not in controller_url and 'tcp://' in controller_url:
+                        controller_url = f"{controller_url}?name=rosbot"
+                        print(f"🔄 修改URL格式: {controller_url}")
+        
+        if not connected:
+            print(f"❌ 实例 {self.instance_id} 多次尝试后仍无法连接")
+            raise ConnectionError(f"无法连接到 Webots 实例 {self.instance_id}")
             
         self.timestep = int(self.supervisor.getBasicTimeStep())
+        # 切换到 FAST 模式（若可用）
+        try:
+            if fast_mode and hasattr(self.supervisor, 'simulationSetMode') and hasattr(Supervisor, 'SIMULATION_MODE_FAST'):
+                self.supervisor.simulationSetMode(Supervisor.SIMULATION_MODE_FAST)
+        except Exception:
+            pass
         
         # 传感器设备
         self._setup_sensors()
@@ -321,9 +382,9 @@ class ROSbotNavigationEnv(gym.Env):
         # 累计步数
         self.episode_steps = int(self.episode_steps) + 1
         
-        # Step仿真 - 为了适应5Hz控制频率，确保每次step足够的时间
-        # 5Hz = 200ms每次控制，而timestep可能是32ms，所以需要多次step
-        steps_per_control = max(1, int(200 / self.timestep))
+        # Step仿真 - 为了适应控制频率，确保每次step足够的时间
+        # control_period_ms（默认200ms），timestep可能是32ms，所以需要多次step
+        steps_per_control = max(1, int(self.control_period_ms / self.timestep))
         for _ in range(steps_per_control):
             self.supervisor.step(self.timestep)
         
@@ -1140,3 +1201,11 @@ class ROSbotNavigationEnv(gym.Env):
         """设置训练模式"""
         self.is_training = mode
         # self.amcl_localizer.set_training_mode(mode)
+
+    def close(self):
+        """释放资源并尽量优雅地停止控制器"""
+        try:
+            if hasattr(self, 'supervisor') and self.supervisor and hasattr(self.supervisor, 'simulationSetMode') and hasattr(Supervisor, 'SIMULATION_MODE_PAUSE'):
+                self.supervisor.simulationSetMode(Supervisor.SIMULATION_MODE_PAUSE)
+        except Exception:
+            pass
