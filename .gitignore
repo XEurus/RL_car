@@ -10,7 +10,6 @@ __pycache__/
 mlruns/
 mlruns_test/
 logs/
-models/
 results/
 暂存/
 test_logs/

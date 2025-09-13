@@ -270,9 +270,9 @@ def start_webots_instance(instance_id: int,
 
     # 构建命令
     cmd = []
-    # 优先使用 xvfb-run（在无显示环境）
+    # 优先使用 xvfb-run（在无显示环境），并指定 24-bit 深度以避免 OpenGL 初始化失败
     if headless:
-        cmd += ['xvfb-run', '--auto-servernum']
+        cmd += ['xvfb-run', '--auto-servernum', '--server-args=-screen 0 1280x1024x24']
     cmd += ['webots']
     
     # 分别应用各参数，确保每个命令行选项都正确添加
@@ -314,8 +314,15 @@ def start_webots_instance(instance_id: int,
     # 重要：不要使用 offscreen 平台（默认镜像通常没有该插件），在 xvfb-run 下使用 xcb 即可
     env['QT_QPA_PLATFORM'] = 'xcb'
     # 清理可能由 OpenCV 注入的插件路径，避免指向 cv2/qt/plugins 导致找不到 xcb
-    if 'QT_PLUGIN_PATH' in env and 'cv2' in env['QT_PLUGIN_PATH']:
-        env.pop('QT_PLUGIN_PATH', None)
+    env.pop('QT_PLUGIN_PATH', None)
+    # 强化 Mesa/OpenGL 兼容设置，避免“Unable to load OpenGL functions”
+    env.setdefault('LIBGL_ALWAYS_INDIRECT', '1')
+    env.setdefault('MESA_GL_VERSION_OVERRIDE', '3.3')
+    env.setdefault('MESA_GLSL_VERSION_OVERRIDE', '330')
+    env.setdefault('QT_OPENGL', 'software')
+    env.setdefault('QT_QUICK_BACKEND', 'software')
+    env.setdefault('__GLX_VENDOR_LIBRARY_NAME', 'mesa')
+    env.setdefault('WEBOTS_DISABLE_SOUND', '1')
     # 在 root/headless 环境下，禁用 QtWebEngine 沙盒
     env['QTWEBENGINE_DISABLE_SANDBOX'] = '1'
     env['QTWEBENGINE_CHROMIUM_FLAGS'] = '--no-sandbox'

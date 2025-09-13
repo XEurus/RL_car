@@ -31,6 +31,47 @@ class ROSbotNavigationEnv(gym.Env):
     
     动作空间：连续2维 [线速度, 角速度]
     """
+    @staticmethod
+    def get_spaces():
+        """无需连接 Webots，返回与环境一致的观测/动作空间定义"""
+        pi = math.pi
+        obs_low = np.array(
+            [0.0] * 20 +
+            [-20.0, -20.0, -2.0] +
+            [-pi, -pi, -pi] +
+            [-2.0, -2.0, -2.0] +
+            [-2.0, -2.0] +
+            [-1.0] +
+            [-20.0, -20.0, -2.0] +
+            [-20.0, -20.0, -2.0] +
+            [-pi] +
+            [-pi] +
+            [-2.0] +
+            [-1.0],
+            dtype=np.float32
+        )
+        obs_high = np.array(
+            [1.0] * 20 +
+            [20.0, 20.0, 2.0] +
+            [pi, pi, pi] +
+            [2.0, 2.0, 2.0] +
+            [2.0, 2.0] +
+            [1.0] +
+            [20.0, 20.0, 2.0] +
+            [20.0, 20.0, 2.0] +
+            [pi] +
+            [pi] +
+            [2.0] +
+            [1.0],
+            dtype=np.float32
+        )
+        obs_space = spaces.Box(low=obs_low, high=obs_high, dtype=np.float32)
+        act_space = spaces.Box(
+            low=np.array([0.0, -1.0], dtype=np.float32),
+            high=np.array([1.0, 1.0], dtype=np.float32),
+            dtype=np.float32
+        )
+        return obs_space, act_space
     
     def __init__(self, 
                  cargo_type: str = 'normal', 
@@ -1036,51 +1077,76 @@ class ROSbotNavigationEnv(gym.Env):
         """检查终止条件"""
         collision_detected = False
 
-        # 1. selfCollision检测 (Webots) - 基于接触点性质的精确检测
-        if self.robot_node:
+        # 全局步计数与朝向历史初始化
+        try:
+            self._global_step = getattr(self, '_global_step', 0) + 1
+            setattr(self, '_global_step', self._global_step)
+            if not hasattr(self, '_heading_hist'):
+                self._heading_hist = []  # 简单列表作为滑窗
+            if not hasattr(self, '_last_pos'):
+                self._last_pos = self._get_sup_position().copy()
+            if not hasattr(self, '_last_contact_check_step'):
+                self._last_contact_check_step = -999999
+        except Exception:
+            # 若异常，继续执行但不启用条件触发
+            self._heading_hist = []
+            self._last_pos = self._get_sup_position().copy()
+            self._last_contact_check_step = -999999
+
+        # 基于平面运动估计朝向，并维护滑动窗口
+        try:
+            curr_pos = self._get_sup_position()
+            dx = float(curr_pos[0] - self._last_pos[0])
+            dy = float(curr_pos[1] - self._last_pos[1])
+            self._last_pos = curr_pos.copy()
+            import math
+            # 仅在移动幅度超过极小阈值时更新朝向估计
+            if (dx * dx + dy * dy) > 1e-6:
+                heading = math.atan2(dy, dx)
+                self._heading_hist.append(heading)
+                if len(self._heading_hist) > 10:
+                    self._heading_hist = self._heading_hist[-10:]
+        except Exception:
+            pass
+
+        # 只有在“朝向在滑窗内基本不变”且“距离上次查询超过间隔”时，才调用昂贵的接触点查询
+        should_check_contacts = False
+        try:
+            if len(self._heading_hist) >= 6:
+                hmax = max(self._heading_hist)
+                hmin = min(self._heading_hist)
+                if (hmax - hmin) < 0.02:  # 约 1.1 度
+                    if (self._global_step - self._last_contact_check_step) >= 5:
+                        should_check_contacts = True
+        except Exception:
+            pass
+
+        # 1. selfCollision检测 (Webots) - 仅在触发条件满足时进行昂贵查询
+        if should_check_contacts and self.robot_node:
             try:
                 contact_points = self.robot_node.getContactPoints(includeDescendants=True)
-                
+                self._last_contact_check_step = self._global_step
                 for cp in contact_points:
-                    # 获取接触点信息
                     other_node_id = cp.getNodeId()
                     contact_z_height = cp.getPoint()[2]
-                    
                     other_node = self.supervisor.getFromId(other_node_id)
                     if other_node is None:
                         continue
-                    
                     other_node_name = ""
                     name_field = other_node.getField("name")
                     if name_field:
                         other_node_name = name_field.getSFString()
-
-                    # 判断是否为正常的车轮-地面接触
-                    # 条件1: 接触的是地面
+                    # 正常车轮-地面接触判定
                     is_ground_contact = other_node_name in self.ground_defs
-                    # 条件2: 接触点高度非常接近于0 (说明是车轮在地面上)
                     is_at_floor_level = abs(contact_z_height) < 0.01
-
-                    # 如果是正常的车轮-地面接触，则跳过
                     if is_ground_contact and is_at_floor_level:
                         continue
-                    
-                    # 否则，判定为一次有效碰撞
                     collision_detected = True
-                    # 获取机器人自身的接触节点以提供更详细的日志
-                    robot_part_node_id = cp.getNodeId() # This seems incorrect based on doc, but let's assume it might give the robot's part ID
-                    robot_part_node = self.supervisor.getFromId(robot_part_node_id)
-                    robot_part_name = "unknown_robot_part"
-                    if robot_part_node:
-                        robot_name_field = robot_part_node.getField("name")
-                        if robot_name_field:
-                            robot_part_name = robot_name_field.getSFString()
-
-                    # print(f"检测到有效碰撞！'{robot_part_name}' 与 '{other_node_name}' 在高度 {contact_z_height:.4f}m 处接触。")
                     break
-
             except Exception as e:
-                print(f"通过getContactPoints检测碰撞时发生错误: {e}")
+                # 静默或降频打印
+                # print(f"通过getContactPoints检测碰撞时发生错误: {e}")
+                pass
 
         if collision_detected:
             return True
