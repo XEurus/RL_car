@@ -389,19 +389,7 @@ def start_webots_instance(instance_id: int,
                             pass
                         _release_reservation(port)
                         print(f"🔁 重新尝试启动 Webots 实例 {instance_id}，更换端口 (重试 {_retry_count+1})")
-                        return start_webots_instance(
-                            instance_id=instance_id,
-                            world_path=str(base_world),
-                            headless=headless,
-                            fast_mode=fast_mode,
-                            no_rendering=no_rendering,
-                            batch=batch,
-                            minimize=minimize,
-                            stdout=stdout,
-                            stderr=stderr,
-                            timeout_seconds=timeout_seconds,
-                            _retry_count=_retry_count + 1,
-                        )
+                        return -2,-2
                     raise RuntimeError(f"Webots 进程提前退出，返回码 {proc.returncode}")
                 time.sleep(0.05)
                 continue

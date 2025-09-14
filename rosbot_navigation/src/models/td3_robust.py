@@ -14,6 +14,10 @@ from stable_baselines3.common.logger import Logger, configure
 from stable_baselines3.common.utils import get_schedule_fn
 from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+
+# MLflow导入
+import mlflow
+import mlflow.pytorch
 # 直接使用TD3的标准分布，无需额外导入
 
 
@@ -373,7 +377,10 @@ class ImprovedTD3(TD3):
         log_interval: int = 4,
         tb_log_name: str = "TD3",
         reset_num_timesteps: bool = True,
-        progress_bar: bool = True
+        progress_bar: bool = True,
+        use_mlflow: bool = True,
+        mlflow_run_name: str = None,
+        mlflow_experiment_name: str = None
     ):
         """训练学习 - 增强版本"""
         print(f"开始ROSbot导航训练 - TD3算法")
@@ -383,8 +390,40 @@ class ImprovedTD3(TD3):
         print(f"AMCL粒子数: 800")
         print(f"✅ 已启用梯度裁剪 (max_norm=0.5)")
         
-        # 确保日志记录器已初始化
-        # 不需要在这里设置，我们已经重写了logger属性
+        # 确保logger可用
+        if self._logger is None:
+            self._logger = configure(None, ["stdout"])
+        
+        # 如果启用MLflow且没有活跃的运行，则创建一个新的运行
+        if use_mlflow and mlflow.active_run() is None:
+            try:
+                # 设置实验名称（如果提供）
+                if mlflow_experiment_name:
+                    mlflow.set_experiment(mlflow_experiment_name)
+                
+                # 开始一个新的MLflow运行
+                run_name = mlflow_run_name or f"td3_{tb_log_name}_{total_timesteps}"
+                mlflow.start_run(run_name=run_name)
+                
+                # 记录模型超参数
+                mlflow.log_params({
+                    "learning_rate": self.learning_rate,
+                    "buffer_size": self.buffer_size,
+                    "learning_starts": self.learning_starts,
+                    "batch_size": self.batch_size,
+                    "tau": self.tau,
+                    "gamma": self.gamma,
+                    "train_freq": self.train_freq,
+                    "gradient_steps": self.gradient_steps,
+                    "policy_delay": self.policy_delay,
+                    "target_policy_noise": self.target_policy_noise,
+                    "target_noise_clip": self.target_noise_clip,
+                    "total_timesteps": total_timesteps
+                })
+                
+                print(f"MLflow跟踪已初始化: {mlflow.get_artifact_uri()}")
+            except Exception as e:
+                print(f"MLflow初始化失败: {e}")
         
         return super().learn(
             total_timesteps=total_timesteps,
@@ -398,9 +437,67 @@ class ImprovedTD3(TD3):
     def _update_policy(self, gradient_steps: int, batch_size: int = 64):
         """重写策略更新以添加梯度裁剪和学习率衰减"""
         # 确保日志记录器已初始化
-        # 不需要在这里设置，我们已经重写了logger属性
+        if self._logger is None:
+            self._logger = configure(None, ["stdout"])
+        
+        # 调用父类方法前收集指标
+        policy_losses = []
+        critic_losses = []
+        
+        # 执行策略更新
+        for _ in range(gradient_steps):
+            # 更新critic
+            critic_loss = self._update_critic(batch_size)
+            if critic_loss is not None:
+                critic_losses.append(critic_loss.item())
             
-        result = super()._update_policy(gradient_steps, batch_size)
+            # 延迟更新actor
+            if self._n_updates % self.policy_delay == 0:
+                # 计算actor loss
+                actor_loss = self._update_actor(batch_size)
+                if actor_loss is not None:
+                    policy_losses.append(actor_loss.item())
+                
+                # 更新目标网络
+                self._update_target_networks()
+            
+            self._n_updates += 1
+        
+        # 记录平均策略损失
+        if len(policy_losses) > 0:
+            policy_loss_mean = np.mean(policy_losses)
+            self.logger.record("train/policy_loss", policy_loss_mean)
+            
+            # 记录到MLflow（如果有活跃的运行）
+            if mlflow.active_run() is not None:
+                try:
+                    mlflow.log_metric("policy_loss", policy_loss_mean, step=self._n_updates)
+                except Exception as e:
+                    print(f"MLflow记录策略损失失败: {e}")
+        
+        # 记录平均critic损失
+        if len(critic_losses) > 0:
+            critic_loss_mean = np.mean(critic_losses)
+            self.logger.record("train/critic_loss", critic_loss_mean)
+            
+            # 记录到MLflow（如果有活跃的运行）
+            if mlflow.active_run() is not None:
+                try:
+                    mlflow.log_metric("critic_loss", critic_loss_mean, step=self._n_updates)
+                except Exception as e:
+                    print(f"MLflow记录critic损失失败: {e}")
+        
+        # 学习率衰减
+        if hasattr(self.policy.optimizer, "param_groups"):
+            current_lr = self.policy.optimizer.param_groups[0]["lr"]
+            self.logger.record("train/learning_rate", current_lr)
+            
+            # 记录到MLflow（如果有活跃的运行）
+            if mlflow.active_run() is not None:
+                try:
+                    mlflow.log_metric("learning_rate", current_lr, step=self._n_updates)
+                except Exception as e:
+                    print(f"MLflow记录学习率失败: {e}")
         
         # 添加梯度裁剪
         if hasattr(self.policy, 'actor'):

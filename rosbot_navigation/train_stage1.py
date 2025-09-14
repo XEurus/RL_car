@@ -29,23 +29,48 @@ import signal
 import multiprocessing as mp
 import time
 from queue import Empty, Full
+from datetime import datetime
 # ================= 分布式训练实现 ==================
 
 def _actor_process(rank: int, cargo_type: str, args: argparse.Namespace, obs_q: mp.Queue, act_q: mp.Queue, exp_q: mp.Queue, stop_event: mp.Event):
     print(f"[ACTOR{rank}] 进程启动...")
     try:
+        # 初始化MLflow跟踪
+        experiment_name = getattr(args, 'experiment_name', None) or f"distributed_training_{cargo_type}"
+        run_name = f"actor{rank}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        # 设置MLflow实验
+        try:
+            mlflow.set_experiment(experiment_name)
+            # 开始一个新的MLflow运行
+            mlflow.start_run(run_name=run_name)
+            
+            # 记录Actor参数
+            mlflow.log_params({
+                "actor_id": rank,
+                "cargo_type": cargo_type,
+                "fast_mode": getattr(args, 'fast_mode', True),
+                "control_period_ms": getattr(args, 'control_period_ms', 200)
+            })
+            print(f"[ACTOR{rank}] MLflow 跟踪已初始化: {experiment_name}/{run_name}")
+        except Exception as e:
+            print(f"[ACTOR{rank}] MLflow 初始化失败: {e}")
         # 启动单实例 Webots 并连接
-        proc, url = start_webots_instance(
-            instance_id=rank,
-            world_path=getattr(args, 'world', None) if args else None,
-            headless=getattr(args, 'headless', True),
-            fast_mode=getattr(args, 'fast_mode', True),
-            no_rendering=getattr(args, 'no_rendering', True),
-            batch=getattr(args, 'batch', True),
-            minimize=getattr(args, 'minimize', True),
-            stdout=True,
-            stderr=True
-        )
+        for i in range(3):
+            proc, url = start_webots_instance(
+                instance_id=rank,
+                world_path=getattr(args, 'world', None) if args else None,
+                headless=getattr(args, 'headless', True),
+                fast_mode=getattr(args, 'fast_mode', True),
+                no_rendering=getattr(args, 'no_rendering', True),
+                batch=getattr(args, 'batch', True),
+                minimize=getattr(args, 'minimize', True),
+                stdout=True,
+                stderr=True
+            )
+            if proc != -2:
+                break
+        
         print(f"[ACTOR{rank}] Webots 启动完成，URL: {url}")
         
         env = ROSbotNavigationEnv(
@@ -62,6 +87,21 @@ def _actor_process(rank: int, cargo_type: str, args: argparse.Namespace, obs_q: 
         print(f"[ACTOR{rank}] 开始采样循环")
         
         episode_steps = 0
+        episode_reward = 0.0
+        episode_count = 0
+        start_time = time.time()
+        
+        # 初始化指标跟踪
+        metrics = {
+            "episodes_completed": 0,
+            "steps_completed": 0,
+            "total_reward": 0.0,
+            "avg_episode_reward": 0.0,
+            "max_episode_reward": float('-inf'),
+            "min_episode_reward": float('inf'),
+            "last_log_time": time.time()
+        }
+        
         while not stop_event.is_set():
             # 1) 将观测放入队列，请求一个动作
             try:
@@ -90,6 +130,26 @@ def _actor_process(rank: int, cargo_type: str, args: argparse.Namespace, obs_q: 
             try:
                 next_obs, reward, terminated, truncated, info = env.step(action)
                 done = bool(terminated or truncated)
+                
+                # 跟踪奖励和指标
+                episode_reward += reward
+                metrics["steps_completed"] += 1
+                metrics["total_reward"] += reward
+                
+                # 降频记录指标到MLflow
+                current_time = time.time()
+                if current_time - metrics["last_log_time"] >= 10.0:  # 每10秒记录一次
+                    try:
+                        if mlflow.active_run():
+                            mlflow.log_metrics({
+                                "actor_steps": metrics["steps_completed"],
+                                "actor_episodes": metrics["episodes_completed"],
+                                "actor_avg_reward": metrics["avg_episode_reward"],
+                                "actor_total_reward": metrics["total_reward"]
+                            }, step=metrics["steps_completed"])
+                    except Exception as e:
+                        print(f"[ACTOR{rank}] MLflow 记录指标失败: {e}")
+                    metrics["last_log_time"] = current_time
             except Exception as e:
                 print(f"[ACTOR{rank}] 环境 step 异常: {e}")
                 continue
@@ -108,17 +168,54 @@ def _actor_process(rank: int, cargo_type: str, args: argparse.Namespace, obs_q: 
             episode_steps += 1
             if done:
                 try:
+                    # 记录完成的episode指标
+                    metrics["episodes_completed"] += 1
+                    metrics["avg_episode_reward"] = metrics["total_reward"] / metrics["episodes_completed"]
+                    metrics["max_episode_reward"] = max(metrics["max_episode_reward"], episode_reward)
+                    metrics["min_episode_reward"] = min(metrics["min_episode_reward"], episode_reward)
+                    
+                    # 记录到MLflow
+                    try:
+                        if mlflow.active_run():
+                            mlflow.log_metrics({
+                                "actor_episode_reward": episode_reward,
+                                "actor_episode_steps": episode_steps,
+                                "actor_max_episode_reward": metrics["max_episode_reward"],
+                                "actor_min_episode_reward": metrics["min_episode_reward"]
+                            }, step=metrics["episodes_completed"])
+                    except Exception as e:
+                        print(f"[ACTOR{rank}] MLflow 记录episode指标失败: {e}")
+                    
+                    print(f"[ACTOR{rank}] Episode {metrics['episodes_completed']} 完成, 奖励: {episode_reward:.4f}, 步数: {episode_steps}")
+                    
+                    # 重置环境和计数器
                     obs, info = env.reset()
+                    episode_reward = 0.0
+                    episode_steps = 0
                 except Exception as e:
                     print(f"[ACTOR{rank}] reset 异常: {e}")
                     continue
-                episode_steps = 0
-                print(f"[ACTOR{rank}] Episode 完成")
     except KeyboardInterrupt:
         print(f"[ACTOR{rank}] 收到中断信号")
     except Exception as e:
         print(f"[ACTOR{rank}] 启动异常: {e}")
     finally:
+        # 结束MLflow运行
+        try:
+            if mlflow.active_run():
+                # 记录最终指标
+                duration = time.time() - start_time
+                mlflow.log_metrics({
+                    "actor_final_episodes": metrics["episodes_completed"],
+                    "actor_final_steps": metrics["steps_completed"],
+                    "actor_runtime_seconds": duration,
+                    "actor_steps_per_second": metrics["steps_completed"] / max(1.0, duration)
+                })
+                mlflow.end_run()
+                print(f"[ACTOR{rank}] MLflow 运行已结束")
+        except Exception as e:
+            print(f"[ACTOR{rank}] MLflow 结束运行失败: {e}")
+            
         print(f"[ACTOR{rank}] 进程退出")
         try:
             env.close()
@@ -130,6 +227,27 @@ def run_distributed_training(args: argparse.Namespace, model_path: str):
     """多Actor+单Learner 训练主控"""
     mp.set_start_method('spawn', force=True)
     num_actors = int(getattr(args, 'num_actors', max(1, args.num_envs if hasattr(args, 'num_envs') else 1)))
+    
+    # 初始化MLflow主运行
+    experiment_name = args.experiment_name or f"distributed_training_{args.cargo_type}"
+    run_name = f"main_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    try:
+        mlflow.set_experiment(experiment_name)
+        mlflow.start_run(run_name=run_name)
+        
+        # 记录分布式训练参数
+        mlflow.log_params({
+            "cargo_type": args.cargo_type,
+            "num_actors": num_actors,
+            "total_steps": getattr(args, 'total_steps', 50000),
+            "device": args.device if hasattr(args, 'device') else 'auto',
+            "distributed_mode": True,
+            "model_path": model_path
+        })
+        print(f"[MAIN] MLflow 跟踪已初始化: {experiment_name}/{run_name}")
+    except Exception as e:
+        print(f"[MAIN] MLflow 初始化失败: {e}")
 
     # 队列：每个 actor 配一对 obs/act 队列；经验共享一个队列
     obs_queues = [mp.Queue(maxsize=8) for _ in range(num_actors)]
@@ -169,11 +287,52 @@ def run_distributed_training(args: argparse.Namespace, model_path: str):
             learner_proc.join(timeout=5)
         except Exception:
             pass
+        
+        # 结束MLflow主运行
+        try:
+            if mlflow.active_run():
+                # 记录训练结束状态
+                mlflow.log_param("training_completed", "interrupted" if sys.exc_info()[0] else "completed")
+                mlflow.end_run()
+                print("[MAIN] MLflow 运行已结束")
+        except Exception as e:
+            print(f"[MAIN] MLflow 结束运行失败: {e}")
 
 
 def _learner_process(args: argparse.Namespace, model_path: str, obs_queues: list, act_queues: list, exp_queue: mp.Queue, stop_event: mp.Event, init_event: mp.Event):
     """Learner：集中选择动作并训练TD3，异步消费经验。"""
     print("[LEARNER] 进程启动...")
+    
+    # 初始化MLflow跟踪
+    experiment_name = args.experiment_name or f"distributed_training_{args.cargo_type}"
+    run_name = f"learner_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    # 设置MLflow实验
+    try:
+        mlflow.set_experiment(experiment_name)
+        # 开始一个新的MLflow运行
+        mlflow.start_run(run_name=run_name)
+        
+        # 记录训练参数
+        mlflow.log_params({
+            "cargo_type": args.cargo_type,
+            "learning_rate": getattr(args, 'learning_rate', 3e-4),
+            "buffer_size": getattr(args, 'buffer_size', 100000),
+            "learning_starts": getattr(args, 'learning_starts', 10000),
+            "batch_size": getattr(args, 'batch_size', 256),
+            "gamma": getattr(args, 'gamma', 0.98),
+            "tau": getattr(args, 'tau', 0.005),
+            "gradient_steps": getattr(args, 'gradient_steps', 1),
+            "train_freq": getattr(args, 'train_freq', 1),
+            "policy_delay": getattr(args, 'policy_delay', 2),
+            "target_policy_noise": getattr(args, 'target_noise', 0.2),
+            "target_noise_clip": getattr(args, 'noise_clip', 0.5),
+            "num_actors": len(obs_queues),
+            "total_steps": getattr(args, 'total_steps', 50000)
+        })
+        print(f"[LEARNER] MLflow 跟踪已初始化: {experiment_name}/{run_name}")
+    except Exception as e:
+        print(f"[LEARNER] MLflow 初始化失败: {e}")
     
     device = args.device if hasattr(args, 'device') else 'auto'
 
@@ -255,6 +414,7 @@ def _learner_process(args: argparse.Namespace, model_path: str, obs_queues: list
     reward_history = []  # 存储所有奖励
     episode_count = 0
     last_reward_print = 0
+    last_mlflow_log = 0  # MLflow日志记录时间点
     
     print(f"[LEARNER] 开始主循环，目标步数: {total_steps}")
 
@@ -333,17 +493,46 @@ def _learner_process(args: argparse.Namespace, model_path: str, obs_queues: list
                 avg_reward = sum(recent_rewards) / len(recent_rewards) if recent_rewards else 0
                 print(f"[LEARNER] 收集样本: {collected}, 缓冲区大小: {model.replay_buffer.size()}, 最近100步平均奖励: {avg_reward:.4f}")
                 
+                # 降频记录到MLflow (每log_interval步)
+                try:
+                    mlflow.log_metrics({
+                        "training_steps": collected,
+                        "buffer_size": model.replay_buffer.size(),
+                        "recent_100_avg_reward": avg_reward,
+                        "actions_served": actions_served
+                    }, step=collected)
+                except Exception as e:
+                    print(f"[LEARNER] MLflow 记录指标失败: {e}")
+                
             # 奖励统计打印
             if collected - last_reward_print >= 1000:  # 每1000步打印一次奖励统计
                 last_reward_print = collected
                 if reward_history:
+                    avg_reward = sum(reward_history) / len(reward_history)
+                    max_reward = max(reward_history)
+                    min_reward = min(reward_history)
+                    recent_avg = sum(reward_history[-100:]) / min(100, len(reward_history))
+                    
                     print(f"\n[LEARNER] === 奖励统计 (步数: {collected}) ===")
-                    print(f"平均奖励: {sum(reward_history) / len(reward_history):.4f}")
-                    print(f"最大奖励: {max(reward_history):.4f}")
-                    print(f"最小奖励: {min(reward_history):.4f}")
-                    print(f"最近100步平均: {sum(reward_history[-100:]) / min(100, len(reward_history)):.4f}")
+                    print(f"平均奖励: {avg_reward:.4f}")
+                    print(f"最大奖励: {max_reward:.4f}")
+                    print(f"最小奖励: {min_reward:.4f}")
+                    print(f"最近100步平均: {recent_avg:.4f}")
                     print(f"已完成Episodes: {episode_count}")
                     print(f"==============================\n")
+                    
+                    # 记录到MLflow
+                    try:
+                        mlflow.log_metrics({
+                            "average_reward": avg_reward,
+                            "max_reward": max_reward,
+                            "min_reward": min_reward,
+                            "recent_100_avg_reward": recent_avg,
+                            "episode_count": episode_count,
+                            "buffer_size": model.replay_buffer.size()
+                        }, step=collected)
+                    except Exception as e:
+                        print(f"[LEARNER] MLflow 记录指标失败: {e}")
             
     except KeyboardInterrupt:
         print("[LEARNER] 收到中断信号")
@@ -356,6 +545,23 @@ def _learner_process(args: argparse.Namespace, model_path: str, obs_queues: list
         try:
             model.save(model_path)
             print(f"[LEARNER] 模型已保存到: {model_path}")
+            
+            # 将模型保存到MLflow
+            try:
+                mlflow.pytorch.log_model(model.policy, "policy_model")
+                # 记录最终指标
+                if reward_history:
+                    mlflow.log_metrics({
+                        "final_avg_reward": sum(reward_history) / len(reward_history),
+                        "final_recent_avg": sum(reward_history[-100:]) / min(100, len(reward_history)),
+                        "total_steps": collected,
+                        "total_episodes": episode_count
+                    })
+                # 结束MLflow运行
+                mlflow.end_run()
+                print("[LEARNER] MLflow 运行已完成并记录")
+            except Exception as e:
+                print(f"[LEARNER] MLflow 记录模型失败: {e}")
         except Exception as e:
             print(f"[LEARNER] 保存模型失败: {e}")
 
@@ -806,11 +1012,12 @@ def train_single_cargo_model(cargo_type: str, total_steps: int, model_save_path:
 
 def main():
     """主函数"""
+    now = datetime.now()
     parser = argparse.ArgumentParser(description='ROSbot第一阶段训练脚本')
     parser.add_argument('--cargo_type', type=str, default='normal', 
                        choices=['normal', 'fragile', 'dangerous'],
                        help='货物类型')
-    parser.add_argument('--total_steps', type=int, default=50000,
+    parser.add_argument('--total_steps', type=int, default=200000,
                        help='总训练步数')
     parser.add_argument('--model_path', type=str, default=None,
                        help='模型保存路径')
@@ -825,23 +1032,23 @@ def main():
     parser.add_argument('--prelaunch_webots', type=bool, default=True, help='是否在主进程串行预启动 Webots 实例以避免并发启动卡顿')
     # 分布式 Actor-Learner
     parser.add_argument('--distributed', type=bool, default=True, help='启用多Actor+单Learner分布式训练')
-    parser.add_argument('--num_actors', type=int, default=4, help='Actor 数量')
+    parser.add_argument('--num_actors', type=int, default=8, help='Actor 数量')
     # 并行/实例与Webots相关参数
-    parser.add_argument('--num_envs', type=int, default=4, help='并行环境数量（>1启用多进程并行）')
-    parser.add_argument('--world', type=str, default='/root/workspace/RL_car2/warehouse/worlds/warehouse4.wbt', help='Webots world 文件路径')
+    parser.add_argument('--num_envs', type=int, default=8, help='并行环境数量（>1启用多进程并行）')
+    parser.add_argument('--world', type=str, default='/root/workspace/RL_car2/warehouse/worlds/warehouse2.wbt', help='Webots world 文件路径')
     parser.add_argument('--headless', type=bool,default=True, help='以无渲染/批处理模式启动 Webots')
     parser.add_argument('--fast_mode', type=bool,default=True, help='使用Webots FAST模式')
     parser.add_argument('--no-rendering',type=bool,default=True, help='渲染模式')
     parser.add_argument('--batch', type=bool,default=True, help='批处理模式')
     parser.add_argument('--minimize', type=bool,default=True, help='最小化模式')
-    parser.add_argument('--control_period_ms', type=int, default=200, help='控制周期(ms)，用于减少控制往返')
+    parser.add_argument('--control_period_ms', type=int, default=100, help='控制周期(ms)，用于减少控制往返')
     parser.add_argument('--seed', type=int, default=0, help='随机种子')
     
     # TD3算法相关参数
-    parser.add_argument('--learning_rate', type=float, default=3e-4, help='学习率')
-    parser.add_argument('--buffer_size', type=int, default=100000, help='经验回放缓冲区大小')
-    parser.add_argument('--learning_starts', type=int, default=10000, help='预热步数，开始学习前收集的样本数量')
-    parser.add_argument('--batch_size', type=int, default=256, help='批处理大小')
+    parser.add_argument('--learning_rate', type=float, default=1e-3, help='学习率')
+    parser.add_argument('--buffer_size', type=int, default=50000, help='经验回放缓冲区大小')
+    parser.add_argument('--learning_starts', type=int, default=50000, help='预热步数，开始学习前收集的样本数量')
+    parser.add_argument('--batch_size', type=int, default=2560, help='批处理大小')
     parser.add_argument('--gamma', type=float, default=0.98, help='折扣因子')
     parser.add_argument('--tau', type=float, default=0.005, help='目标网络软更新系数')
     parser.add_argument('--gradient_steps', type=int, default=1, help='每步梯度更新次数')
@@ -851,6 +1058,7 @@ def main():
     parser.add_argument('--noise_clip', type=float, default=0.5, help='噪声裁剪范围')
     
     args = parser.parse_args()
+    args.experiment_name = f"{now}_{args.cargo_type}_{args.total_steps}"
     
     # 设置调试模式
     if args.debug:
@@ -858,12 +1066,16 @@ def main():
         torch.autograd.set_detect_anomaly(True)
     
     # 创建模型保存目录
-    models_dir = Path("./models/stage1")
+    results_dir = Path("./results/test")
+    results_dir.mkdir(parents=True, exist_ok=True)
+    
+    models_dir = Path(f"{results_dir}/models")
     models_dir.mkdir(parents=True, exist_ok=True)
     
     # 模型文件路径
+    now=datetime.now()
     if args.model_path is None:
-        model_path = str(models_dir / f"td3_{args.cargo_type}_stage1_{args.total_steps}.zip")
+        model_path = str(models_dir / f"td3_{args.cargo_type}_stage1_{args.total_steps}_{now}.zip")
     else:
         model_path = args.model_path
     
@@ -876,13 +1088,13 @@ def main():
     print(f"{'='*60}")
     
     # 显示关键训练参数 - 让用户确认参数已生效
-    print(f"\n📋 已配置的训练参数:")
-    print(f"  🧠 学习率: {args.learning_rate}")
-    print(f"  📦 缓冲区大小: {args.buffer_size}")
-    print(f"  🔥 预热步数: {args.learning_starts}")
-    print(f"  📊 批处理大小: {args.batch_size}")
-    print(f"  🔄 并行环境数: {args.num_envs}")
-    print(f"  ⏱️ 控制周期: {args.control_period_ms} ms")
+    print(f"\n已配置的训练参数:")
+    print(f"学习率: {args.learning_rate}")
+    print(f"缓冲区大小: {args.buffer_size}")
+    print(f"预热步数: {args.learning_starts}")
+    print(f"批处理大小: {args.batch_size}")
+    print(f"并行环境数: {args.num_actors}")
+    print(f"控制周期: {args.control_period_ms} ms")
     print(f"{'='*60}\n")
     
     try:
