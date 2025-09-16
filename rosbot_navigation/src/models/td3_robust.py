@@ -109,17 +109,20 @@ class RobustTD3Policy(BasePolicy):
         # 输出层 - 确定性和噪声分支
         layers.append(nn.Linear(self.net_arch[-1], self.net_arch[-1]))
         
-        # 策略头和噪声头
+        # 策略头和噪声头 - 增强长期规划能力
+        # 使用更大的中间层来处理多个动作的输出
         self.policy_head = nn.Sequential(
-            nn.Linear(self.net_arch[-1], self.net_arch[-1]),
+            nn.Linear(self.net_arch[-1], self.net_arch[-1] * 2),
             self.activation_fn(),
-            nn.Linear(self.net_arch[-1], self.action_space.shape[0])
+            nn.LayerNorm(self.net_arch[-1] * 2),
+            nn.Linear(self.net_arch[-1] * 2, self.action_space.shape[0])
         )
         
         self.noise_head = nn.Sequential(
-            nn.Linear(self.net_arch[-1], self.net_arch[-1]),
-            self.activation_fn(), 
-            nn.Linear(self.net_arch[-1], self.action_space.shape[0])
+            nn.Linear(self.net_arch[-1], self.net_arch[-1] * 2),
+            self.activation_fn(),
+            nn.LayerNorm(self.net_arch[-1] * 2),
+            nn.Linear(self.net_arch[-1] * 2, self.action_space.shape[0])
         )
         
         return nn.Sequential(*layers)
@@ -147,7 +150,10 @@ class RobustTD3Policy(BasePolicy):
         return nn.Sequential(*layers)
     
     def forward(self, obs: torch.Tensor, deterministic: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
-        """前向传播"""
+        """前向传播 - 增强长期规划能力
+        
+        输出10维动作空间，包含5个连续的动作，每个动作2维[线速度, 角速度]
+        """
         # 特征提取
         features = self.extract_features(obs)
         
@@ -157,11 +163,40 @@ class RobustTD3Policy(BasePolicy):
         # 主策略输出
         mean_actions = self.policy_head(core_features)
         
+        # 将动作重塑为(batch_size, 5, 2)以便于处理时序依赖关系
+        batch_size = mean_actions.shape[0]
+        mean_actions_reshaped = mean_actions.view(batch_size, 5, 2)
+        
+        # 应用时序平滑化，确保相邻动作之间的连续性
+        # 对于第一个动作保持原样，后续动作与前一个动作保持一定的相关性
+        for i in range(1, 5):
+            # 应用平滑因子，使当前动作部分依赖于前一个动作
+            smoothing_factor = 0.3  # 可调整的平滑因子
+            mean_actions_reshaped[:, i] = mean_actions_reshaped[:, i] * (1 - smoothing_factor) + \
+                                        mean_actions_reshaped[:, i-1] * smoothing_factor
+        
+        # 重新展平为10维动作
+        mean_actions = mean_actions_reshaped.reshape(batch_size, -1)
+        
         if deterministic:
             actions = torch.tanh(mean_actions)
         else:
             # 噪声输出
             noise_std = torch.sigmoid(self.noise_head(core_features))
+            
+            # 将噪声重塑为(batch_size, 5, 2)以应用不同的噪声策略
+            noise_std_reshaped = noise_std.view(batch_size, 5, 2)
+            
+            # 远期动作的噪声逐渐增大，表示长期不确定性增加
+            for i in range(1, 5):
+                # 每个时间步噪声系数增加
+                noise_factor = 1.0 + i * 0.15  # 每个时间步增加15%的噪声
+                noise_std_reshaped[:, i] = noise_std_reshaped[:, i] * noise_factor
+            
+            # 重新展平
+            noise_std = noise_std_reshaped.reshape(batch_size, -1)
+            
+            # 应用噪声
             noise = torch.randn_like(mean_actions) * noise_std * 0.1
             actions = torch.tanh(mean_actions + noise)
         
@@ -370,6 +405,177 @@ class ImprovedTD3(TD3):
             **kwargs
         )
     
+    def get_model_architecture_info(self) -> Dict[str, Any]:
+        """获取模型架构的详细信息，用于记录到MLflow"""
+        # 获取策略网络信息
+        if not hasattr(self, "policy") or self.policy is None:
+            return {"error": "Policy not initialized"}
+        
+        # 基本架构信息
+        architecture_info = {
+            "model_type": "ImprovedTD3",
+            "policy_type": self.policy.__class__.__name__,
+            "policy_kwargs": self.policy_kwargs,
+        }
+        
+        # 如果策略已初始化，获取更详细的网络结构
+        if hasattr(self.policy, "actor") and self.policy.actor is not None:
+            # 获取策略网络结构
+            actor_layers = []
+            for name, module in self.policy.actor.named_children():
+                actor_layers.append(f"{name}: {module.__class__.__name__}")
+                if hasattr(module, "in_features") and hasattr(module, "out_features"):
+                    actor_layers[-1] += f" ({module.in_features} -> {module.out_features})"
+            
+            # 获取策略头结构
+            policy_head_layers = []
+            for name, module in self.policy.policy_head.named_children():
+                policy_head_layers.append(f"{name}: {module.__class__.__name__}")
+                if hasattr(module, "in_features") and hasattr(module, "out_features"):
+                    policy_head_layers[-1] += f" ({module.in_features} -> {module.out_features})"
+            
+            # 获取噪声头结构
+            noise_head_layers = []
+            for name, module in self.policy.noise_head.named_children():
+                noise_head_layers.append(f"{name}: {module.__class__.__name__}")
+                if hasattr(module, "in_features") and hasattr(module, "out_features"):
+                    noise_head_layers[-1] += f" ({module.in_features} -> {module.out_features})"
+            
+            # 获取特征提取器结构
+            features_extractor_layers = []
+            if hasattr(self.policy, "features_extractor") and self.policy.features_extractor is not None:
+                for name, module in self.policy.features_extractor.named_children():
+                    features_extractor_layers.append(f"{name}: {module.__class__.__name__}")
+                    # 如果是Sequential，进一步获取其子模块
+                    if isinstance(module, nn.Sequential):
+                        for i, submodule in enumerate(module):
+                            features_extractor_layers.append(f"  {i}: {submodule.__class__.__name__}")
+                            if hasattr(submodule, "in_features") and hasattr(submodule, "out_features"):
+                                features_extractor_layers[-1] += f" ({submodule.in_features} -> {submodule.out_features})"
+            
+            # 获取评论家网络结构
+            critic_layers = []
+            if hasattr(self.policy, "critics") and len(self.policy.critics) > 0:
+                for i, critic in enumerate(self.policy.critics):
+                    critic_layers.append(f"Critic {i}:")
+                    for j, module in enumerate(critic):
+                        critic_layers.append(f"  {j}: {module.__class__.__name__}")
+                        if hasattr(module, "in_features") and hasattr(module, "out_features"):
+                            critic_layers[-1] += f" ({module.in_features} -> {module.out_features})"
+            
+            # 计算参数总量
+            total_params = sum(p.numel() for p in self.policy.parameters() if p.requires_grad)
+            
+            # 更新架构信息
+            architecture_info.update({
+                "actor_layers": actor_layers,
+                "policy_head_layers": policy_head_layers,
+                "noise_head_layers": noise_head_layers,
+                "features_extractor_layers": features_extractor_layers,
+                "critic_layers": critic_layers,
+                "total_trainable_parameters": total_params,
+                "observation_space": str(self.observation_space),
+                "action_space": str(self.action_space),
+                "learning_rate": self.learning_rate,
+                "buffer_size": self.buffer_size,
+                "batch_size": self.batch_size,
+                "tau": self.tau,
+                "gamma": self.gamma,
+                "policy_delay": self.policy_delay,
+                "target_policy_noise": self.target_policy_noise,
+                "target_noise_clip": self.target_noise_clip
+            })
+        
+        return architecture_info
+    
+    def log_model_architecture_to_mlflow(self):
+        """将模型架构记录到MLflow"""
+        if not mlflow.active_run():
+            print("没有活跃的MLflow运行，无法记录模型架构")
+            return
+        
+        try:
+            # 获取模型架构信息
+            architecture_info = self.get_model_architecture_info()
+            
+            # 将架构信息转换为字符串格式，便于MLflow记录
+            architecture_str = "\n".join([
+                "# 模型架构详情",
+                f"## 基本信息",
+                f"- 模型类型: {architecture_info['model_type']}",
+                f"- 策略类型: {architecture_info['policy_type']}",
+                f"- 可训练参数总量: {architecture_info.get('total_trainable_parameters', 'N/A')}",
+                f"- 观测空间: {architecture_info.get('observation_space', 'N/A')}",
+                f"- 动作空间: {architecture_info.get('action_space', 'N/A')}",
+                
+                f"\n## 超参数",
+                f"- 学习率: {architecture_info.get('learning_rate', 'N/A')}",
+                f"- 缓冲区大小: {architecture_info.get('buffer_size', 'N/A')}",
+                f"- 批次大小: {architecture_info.get('batch_size', 'N/A')}",
+                f"- Tau: {architecture_info.get('tau', 'N/A')}",
+                f"- Gamma: {architecture_info.get('gamma', 'N/A')}",
+                f"- 策略延迟: {architecture_info.get('policy_delay', 'N/A')}",
+                f"- 目标策略噪声: {architecture_info.get('target_policy_noise', 'N/A')}",
+                f"- 目标噪声裁剪: {architecture_info.get('target_noise_clip', 'N/A')}",
+                
+                f"\n## 特征提取器",
+                *[f"- {layer}" for layer in architecture_info.get('features_extractor_layers', ['N/A'])],
+                
+                f"\n## Actor网络",
+                *[f"- {layer}" for layer in architecture_info.get('actor_layers', ['N/A'])],
+                
+                f"\n### 策略头",
+                *[f"- {layer}" for layer in architecture_info.get('policy_head_layers', ['N/A'])],
+                
+                f"\n### 噪声头",
+                *[f"- {layer}" for layer in architecture_info.get('noise_head_layers', ['N/A'])],
+                
+                f"\n## Critic网络",
+                *[f"- {layer}" for layer in architecture_info.get('critic_layers', ['N/A'])],
+            ])
+            
+            # 记录架构信息到MLflow
+            mlflow.log_text(architecture_str, "model_architecture.md")
+            
+            # 记录策略参数
+            mlflow.log_dict(architecture_info, "model_architecture.json")
+            
+            # 记录PyTorch模型结构图 (可选，需要graphviz支持)
+            try:
+                # 尝试使用torchviz记录模型结构图
+                import torch
+                from torchviz import make_dot
+                
+                # 创建一个示例输入
+                dummy_input = torch.zeros((1, *self.observation_space.shape), 
+                                         dtype=torch.float32, 
+                                         device=self.device)
+                
+                # 获取模型输出
+                with torch.no_grad():
+                    actions, _ = self.policy(dummy_input)
+                
+                # 创建计算图
+                dot = make_dot(actions, params=dict(self.policy.named_parameters()))
+                
+                # 保存为临时文件
+                import tempfile
+                import os
+                
+                with tempfile.TemporaryDirectory() as tmpdirname:
+                    dot_path = os.path.join(tmpdirname, "model_graph")
+                    dot.render(dot_path, format="png")
+                    mlflow.log_artifact(f"{dot_path}.png", "model_architecture")
+            except ImportError:
+                print("torchviz未安装，跳过模型结构图记录")
+            except Exception as e:
+                print(f"记录模型结构图失败: {e}")
+            
+            print("✅ 模型架构已成功记录到MLflow")
+            
+        except Exception as e:
+            print(f"记录模型架构到MLflow失败: {e}")
+    
     def learn(
         self,
         total_timesteps: int,
@@ -420,6 +626,9 @@ class ImprovedTD3(TD3):
                     "target_noise_clip": self.target_noise_clip,
                     "total_timesteps": total_timesteps
                 })
+                
+                # 记录模型架构信息
+                self.log_model_architecture_to_mlflow()
                 
                 print(f"MLflow跟踪已初始化: {mlflow.get_artifact_uri()}")
             except Exception as e:

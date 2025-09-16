@@ -11,6 +11,8 @@ import os
 from typing import Dict, Tuple, List, Optional
 from collections import deque
 
+from torch import normal
+
 from ..localization.amcl_localizer import AMCLLocalizer
 from ..localization.pose_estimator import RobustPoseEstimator
 from ..utils.navigation_utils import NavigationUtils
@@ -29,7 +31,9 @@ class ROSbotNavigationEnv(gym.Env):
     - 目标导航信息 (6维)
     - 航向控制信息 (4维)
     
-    动作空间：连续2维 [线速度, 角速度]
+    动作空间：10维（5个子动作 × 每个子动作2维）
+    - 每个子动作为 [左轮速度百分比, 右轮速度百分比]
+    - 范围均为 [0.0, 1.0]，对应实际速度 [0.0, 26.0] rad/s
     """
     @staticmethod
     def get_spaces():
@@ -66,9 +70,10 @@ class ROSbotNavigationEnv(gym.Env):
             dtype=np.float32
         )
         obs_space = spaces.Box(low=obs_low, high=obs_high, dtype=np.float32)
+        # 修改为10维动作空间（5个子动作，每个子动作2维：左右轮速度百分比，范围0-1）
         act_space = spaces.Box(
-            low=np.array([0.0, -1.0], dtype=np.float32),
-            high=np.array([1.0, 1.0], dtype=np.float32),
+            low=np.array([0.0, 0.0] * 5, dtype=np.float32),
+            high=np.array([1.0, 1.0] * 5, dtype=np.float32),
             dtype=np.float32
         )
         return obs_space, act_space
@@ -78,7 +83,8 @@ class ROSbotNavigationEnv(gym.Env):
                  instance_id: Optional[int] = None,
                  controller_url: Optional[str] = None,
                  fast_mode: bool = True,
-                 control_period_ms: int = 200):
+                 control_period_ms: int = 200,
+                 debug: bool = False):
         super(ROSbotNavigationEnv, self).__init__()
         
         # 货物类型
@@ -86,6 +92,8 @@ class ROSbotNavigationEnv(gym.Env):
         self.is_training = True
         self.instance_id = instance_id if instance_id is not None else 0
         self.control_period_ms = int(control_period_ms) if control_period_ms and control_period_ms > 0 else 200
+        # 调试模式
+        self.debug = bool(debug)
         
         # 启用初始朝向目标
         self._rotate_to_target_on_reset = True
@@ -132,10 +140,13 @@ class ROSbotNavigationEnv(gym.Env):
             dtype=np.float32
         )
         
-        # 动作空间
+        # 动作空间 - 10维（5个子动作，每个子动作2维）
+        # 现在改为控制左右轮速度百分比，范围0-1：
+        #   [左轮速度百分比, 右轮速度百分比]，范围均为 [0.0, 1.0]
+        #   对应实际速度范围 [0.0, 26.0] rad/s，无反向速度
         self.action_space = spaces.Box(
-            low=np.array([0.0, -1.0]),    # 线速度[0-1], 角速度[-1,1] (归一化值，实际会乘以系数)
-            high=np.array([1.0, 1.0]),
+            low=np.array([0.0, 0.0] * 5),
+            high=np.array([1.0, 1.0] * 5),
             dtype=np.float32
         )
         
@@ -244,9 +255,9 @@ class ROSbotNavigationEnv(gym.Env):
         }
         
         # 训练参数
-        self.max_steps_per_episode = 300
+        self.max_steps_per_episode = 60
         self.collision_threshold = 0.05
-        self.success_threshold = 0.25  # 放宽到25cm，更容易成功
+        self.success_threshold = 0.20  # 放宽到25cm，更容易成功
         
         # 轨迹跟踪
         self.trajectory = []
@@ -314,7 +325,6 @@ class ROSbotNavigationEnv(gym.Env):
         # 获取机器人节点
         self.robot_node = self.supervisor.getFromDef('rosbot')
         
-        # 根据proto文件中的电机名称获取电机
         self.fl_motor = self.supervisor.getDevice('fl_wheel_joint')
         self.fr_motor = self.supervisor.getDevice('fr_wheel_joint')
         self.rl_motor = self.supervisor.getDevice('rl_wheel_joint')
@@ -401,7 +411,7 @@ class ROSbotNavigationEnv(gym.Env):
             self._rotate_to_target()
         
         # 获取初始观察
-        observation = self._get_observation()
+        observation,lidar_data = self._get_observation()
         
         # 设置初始AMCL状态
         # self._initialize_amcl_state()
@@ -412,39 +422,74 @@ class ROSbotNavigationEnv(gym.Env):
             'cargo_type': self.cargo_type
         }
         
-        return observation, info
+        return observation, info,lidar_data
+    
+    def _debug(self, msg: str):
+        """条件调试输出"""
+        try:
+            if getattr(self, 'debug', False):
+                step = int(getattr(self, '_global_step', 0))
+                print(f"[DEBUG][inst {self.instance_id}][step {step}] {msg}")
+        except Exception:
+            pass
     
     def step(self, action):
-        """执行动作并返回新状态"""
-        # 执行动作
-        self._execute_action(action)
-        # 更新奖励函数中的动作历史
-        self.reward_functions.update_action_history(action)
-        # 更新当前旋转（使用命令角速度作为近似）
-        self.reward_functions.update_current_rotation(float(getattr(self, '_last_cmd_angular_vel', 0.0)))
-        # 累计步数
-        self.episode_steps = int(self.episode_steps) + 1
+        """执行动作并返回新状态
         
-        # Step仿真 - 为了适应控制频率，确保每次step足够的时间
-        # control_period_ms（默认200ms），timestep可能是32ms，所以需要多次step
-        steps_per_control = max(1, int(self.control_period_ms / self.timestep))
-        for _ in range(steps_per_control):
-            self.supervisor.step(self.timestep)
+        参数:
+            action: 10维动作空间，包含5个连续的子动作，每个子动作2维
+                    [左轮速度百分比, 右轮速度百分比]
+                - 两者范围均为 [0.0, 1.0]，对应实际速度 [0.0, 26.0] rad/s
+                - 环境内部将百分比转换为实际轮速，并进行限幅与单步平滑
+        """
+        total_reward = 0
+        observation = None
         
-        # 获取新观察
-        observation = self._get_observation()
-        
-        # 更新AMCL状态
-        # self._update_amcl_state()
-        
-        # 计算奖励
-        reward = self._calculate_reward(action, observation)
-        
-        # 检查终止条件
-        terminated = self._check_termination()
-        
-        # 检查截断条件
-        truncated = self._check_truncation()
+        # 将10维动作重塑为5个2维动作
+        actions = action.reshape(5, 2)
+
+        # 顺序执行5个动作，每个动作间隔200ms
+        for i in range(5):
+            current_action = actions[i]
+            
+            # 执行当前动作
+            self._debug(f"substep {i+1}/5 action: L={float(current_action[0]):.4f}, R={float(current_action[1]):.4f}")
+            self._execute_action(current_action)
+            
+            # 更新奖励函数中的动作历史
+            self.reward_functions.update_action_history(current_action)
+            
+            # 更新当前旋转（使用命令角速度作为近似）
+            self.reward_functions.update_current_rotation(float(getattr(self, '_last_cmd_angular_vel', 0.0)))
+            
+            # 累计步数
+            self.episode_steps = int(self.episode_steps) + 1
+            
+            # Step仿真 - 为了适应控制频率，确保每次step足够的时间
+            # control_period_ms（默认200ms），timestep可能是32ms，所以需要多次step
+            steps_per_control = max(1, int(self.control_period_ms / self.timestep))
+            for _ in range(steps_per_control):
+                self.supervisor.step(self.timestep)
+            
+            # 获取当前观察（用于计算奖励和最终返回）
+            observation,lidar_data = self._get_observation()
+            
+            # 计算当前动作的奖励
+            action_reward = self._calculate_reward(current_action, observation)
+            # 检查是否提前终止
+            terminated = self._check_termination()
+            # 检查截断条件
+            truncated = self._check_truncation()
+            try:
+                d, _ = self._calculate_distance_to_target()
+                self._debug(f"reward={action_reward:+.4f}, dist_to_target={d:.3f}, terminated={terminated}, truncated={truncated}")
+            except Exception:
+                self._debug(f"reward={action_reward:+.4f}, terminated={terminated}, truncated={truncated}")
+            total_reward += action_reward            
+
+            # 检查是否提前终止或截断
+            if terminated or truncated:
+                break
         
         # 更新状态信息
         info = self._get_step_info()
@@ -459,7 +504,7 @@ class ROSbotNavigationEnv(gym.Env):
             except Exception as e:
                 print(f"记录轨迹错误: {e}")
         
-        return observation, reward, terminated, truncated, info
+        return observation, total_reward, terminated, truncated, info,lidar_data
 
     def _calculate_distance_to_target(self):
         """计算到当前目标的距离及目标位置"""
@@ -481,7 +526,7 @@ class ROSbotNavigationEnv(gym.Env):
 
     def _get_lidar_features(self):
         """获取用于奖励的LiDAR特征（0-1，约对应0-10m归一化）"""
-        data = self._get_lidar_data()
+        data,_ = self._get_lidar_data()
         return data if isinstance(data, np.ndarray) else np.array(data, dtype=np.float32)
     
     def _set_navigation_task(self):
@@ -515,6 +560,7 @@ class ROSbotNavigationEnv(gym.Env):
             # 获取当前位置和目标位置
             current_pos = self._get_sup_position()
             target_pos = self.task_info['target_pos']
+
             
             # 计算朝向目标的方向向量
             dx = target_pos[0] - current_pos[0]
@@ -523,12 +569,28 @@ class ROSbotNavigationEnv(gym.Env):
             # 计算目标朝向角度（偏航角）
             target_yaw = math.atan2(dy, dx)
             
+            # 将角度简化为四个主要方向（0, π/2, π, -π/2）
+            # 根据角度所在的象限确定大致朝向
+            if -math.pi/4 <= target_yaw < math.pi/4:
+                # 朝向右侧 (东)
+                simplified_yaw = 0
+            elif math.pi/4 <= target_yaw < 3*math.pi/4:
+                # 朝向上方 (北)
+                simplified_yaw = math.pi/2
+            elif target_yaw >= 3*math.pi/4 or target_yaw < -3*math.pi/4:
+                # 朝向左侧 (西)
+                simplified_yaw = math.pi
+            else:
+                # 朝向下方 (南)
+                simplified_yaw = -math.pi/2
+            
+            self._debug(f"目标朝向角度: {target_yaw}, 简化朝向: {simplified_yaw}")
             # 获取当前朝向
-            current_orientation = self._get_sup_orientation()
-            current_yaw = current_orientation[2]
+            #current_orientation = self._get_sup_orientation()
+            #current_yaw = current_orientation[2]
             
             # 计算需要旋转的角度（最短路径）
-            delta_yaw = math.atan2(math.sin(target_yaw - current_yaw), math.cos(target_yaw - current_yaw))
+            #delta_yaw = math.atan2(math.sin(target_yaw - current_yaw), math.cos(target_yaw - current_yaw))
             
 
             # 2. 重置物理状态，确保没有残余动量
@@ -544,7 +606,8 @@ class ROSbotNavigationEnv(gym.Env):
             # 设置新的旋转 - 只改变Y轴旋转（偏航角），保持其他轴为0
             # Webots中，机器人应该是平放在地面上的，所以我们需要保持X和Z轴的旋转为0
             # 标准姿态是[0, 1, 0, angle]，表示绕Y轴旋转angle角度
-            new_rotation = [0, 0, 1, target_yaw]
+            # 使用简化的朝向角度而不是精确角度
+            new_rotation = [0, 0, 1, simplified_yaw]
             
             # 重新设置机器人的位置和姿态
             self.robot_node.getField('translation').setSFVec3f(current_translation)
@@ -732,23 +795,32 @@ class ROSbotNavigationEnv(gym.Env):
         # else:
         #     self._predictive_obstacle_penalty = False
         
-        # 动作缩放 - 参考成功代码的缩放系数
-        linear_vel = float(action[0])
-        angular_vel = float(action[1])
+        # 差速模型：将百分比转换为电机角速度（rad/s）
+        max_motor_speed = getattr(self, 'max_motor_speed', 26.0)
+        # 将0-1的百分比直接乘以最大速度
+        cmd_left_percent = float(action[0])  # 0-1范围
+        cmd_right_percent = float(action[1])  # 0-1范围
         
-        # 差分驱动计算
-        left_speed, right_speed = self._diff_drive_kinematics(linear_vel, angular_vel)
+        # 将百分比转换为实际轮速：
+        # - 0.0: 停止 (0.0)
+        # - 1.0: 最大正向速度 (+max_motor_speed)
+        cmd_left_speed = cmd_left_percent * max_motor_speed
+        cmd_right_speed = cmd_right_percent * max_motor_speed
+        
+        self._debug(f"cmd_wheels_in: L={cmd_left_percent:.4f}->{cmd_left_speed:.4f}, R={cmd_right_percent:.4f}->{cmd_right_speed:.4f}")
+        left_speed = float(np.clip(cmd_left_speed, 0.0, max_motor_speed))
+        right_speed = float(np.clip(cmd_right_speed, 0.0, max_motor_speed))
 
         # 平滑限速：限制单步变化，避免瞬时大扭矩引发不稳定
         max_motor_speed = getattr(self, 'max_motor_speed', 26.0)
         # 每步允许的最大变化（与设备能力成比例）
-        max_delta = max_motor_speed * 0.2  # 例如 20%/step
-        left_speed = float(np.clip(left_speed,
-                                   getattr(self, '_prev_left_speed', 0.0) - max_delta,
-                                   getattr(self, '_prev_left_speed', 0.0) + max_delta))
-        right_speed = float(np.clip(right_speed,
-                                    getattr(self, '_prev_right_speed', 0.0) - max_delta,
-                                    getattr(self, '_prev_right_speed', 0.0) + max_delta))
+        max_delta = max_motor_speed * 0.6  # 例如 60%/step
+        prev_left = float(getattr(self, '_prev_left_speed', 0.0))
+        prev_right = float(getattr(self, '_prev_right_speed', 0.0))
+        # 限制变化范围，但确保不会低于0
+        left_speed = float(np.clip(left_speed, max(0.0, prev_left - max_delta), prev_left + max_delta))
+        right_speed = float(np.clip(right_speed, max(0.0, prev_right - max_delta), prev_right + max_delta))
+        self._debug(f"cmd_wheels_post_smooth: L={left_speed:.4f} (prev {prev_left:.4f}), R={right_speed:.4f} (prev {prev_right:.4f}), max_delta={max_delta:.3f}")
         
         # 设置四个电机速度 - 左侧两个轮子相同速度，右侧两个轮子相同速度
         if self.fl_motor and self.fr_motor and self.rl_motor and self.rr_motor:
@@ -761,14 +833,19 @@ class ROSbotNavigationEnv(gym.Env):
             self.rr_motor.setVelocity(right_speed)
             
             # 打印调试信息
-            # print(f"设置电机速度 - 左: {left_speed:.4f}, 右: {right_speed:.4f} (线速度: {linear_vel:.4f}, 角速度: {angular_vel:.4f})")
+            self._debug(f"设置电机速度 - 左: {left_speed:.4f}, 右: {right_speed:.4f}")
 
         # 记录本次轮速用于下次平滑
         self._prev_left_speed = left_speed
         self._prev_right_speed = right_speed
-        # 记录命令速度用于反打转检测
-        self._last_cmd_linear_vel = linear_vel
-        self._last_cmd_angular_vel = angular_vel
+        # 记录命令速度用于反打转检测（由轮速反推出等效线/角速度）
+        wheel_base = getattr(self, 'wheel_base', 0.22)
+        wheel_radius = getattr(self, 'wheel_radius', 0.043)
+        linear_vel_est = wheel_radius * (left_speed + right_speed) / 2.0
+        angular_vel_est = wheel_radius * (right_speed - left_speed) / max(wheel_base, 1e-6)
+        self._last_cmd_linear_vel = float(linear_vel_est)
+        self._last_cmd_angular_vel = float(angular_vel_est)
+        self._debug(f"vel_est: lin={linear_vel_est:+.3f} m/s, ang={angular_vel_est:+.3f} rad/s")
     
     def _diff_drive_kinematics(self, linear_vel, angular_vel):
         """差速驱动运动学计算"""
@@ -792,7 +869,7 @@ class ROSbotNavigationEnv(gym.Env):
         observation = np.zeros(42, dtype=np.float32)
         
         # 1. LiDAR数据 (0-19)
-        observation[0:20] = self._get_lidar_data()
+        observation[0:20],lidar_data = self._get_lidar_data()
         
         # 2. AMCL定位结果 (20-31) - 核心改进
         # amcl_state = self._get_amcl_state()
@@ -809,7 +886,7 @@ class ROSbotNavigationEnv(gym.Env):
         heading_info = self._get_heading_info()
         observation[38:42] = heading_info
         
-        return observation
+        return observation,lidar_data
     
     def _get_supervisor_pose_state(self):
         """获取基于supervisor的位姿状态 (12维), 模拟amcl_state的输出"""
@@ -882,21 +959,27 @@ class ROSbotNavigationEnv(gym.Env):
         
         # return amcl_state
     
-    def _get_lidar_data(self):
+    def _get_lidar_data(self,norm_lidar=False):
         """获取LiDAR数据"""
-        if self.lidar is None:
-            return np.zeros(20, dtype=np.float32)
-            
         try:
             # 真实Webots模式
             ranges = self.lidar.getRangeImage()
+            lidar_data = ranges
             if ranges and len(ranges) >= 20:
-                # 均匀采样20个数据点
-                indices = np.linspace(0, len(ranges)-1, 20, dtype=int)
+                # 从8开始每距离6个下标选一个，选10个
+                indices1 = np.arange(8, 8+60, 6)
+                # 从339开始，每隔6个下标选一个，一共选择20个点作为激光雷达数据输入
+                indices2 = np.arange(339, 339+60, 6)
+                indices = np.concatenate([indices1, indices2])
                 data = np.array([ranges[i] for i in indices])
                 # 限制范围和归一化
                 data = np.clip(data, 0.01, 10.0) / 10.0
-                return data.astype(np.float32)
+                # 维护最近一次的障碍物最近距离（米）供信息输出/调试
+                try:
+                    self.min_obstacle_distance = float(np.min(data) * 10.0)
+                except Exception:
+                    pass
+                return data.astype(np.float32),lidar_data
         except AttributeError:
             raise Exception(AttributeError)
     
@@ -1079,12 +1162,18 @@ class ROSbotNavigationEnv(gym.Env):
 
         # 全局步计数与朝向历史初始化
         try:
+            # 记录当前步数
             self._global_step = getattr(self, '_global_step', 0) + 1
+            # 步数统计变量
             setattr(self, '_global_step', self._global_step)
+            # 记录当前步数
+            # 滑动窗口用于记录最近几个步骤的偏航角
             if not hasattr(self, '_heading_hist'):
                 self._heading_hist = []  # 简单列表作为滑窗
+            # 记录当前位置
             if not hasattr(self, '_last_pos'):
                 self._last_pos = self._get_sup_position().copy()
+            # 上一次联系检查的步数
             if not hasattr(self, '_last_contact_check_step'):
                 self._last_contact_check_step = -999999
         except Exception:
@@ -1109,17 +1198,14 @@ class ROSbotNavigationEnv(gym.Env):
         except Exception:
             pass
 
-        # 只有在“朝向在滑窗内基本不变”且“距离上次查询超过间隔”时，才调用昂贵的接触点查询
-        should_check_contacts = False
+        # 简化：固定频率检查接触点，避免漏检（每步最多检查一次）
+        should_check_contacts = True
         try:
-            if len(self._heading_hist) >= 6:
-                hmax = max(self._heading_hist)
-                hmin = min(self._heading_hist)
-                if (hmax - hmin) < 0.02:  # 约 1.1 度
-                    if (self._global_step - self._last_contact_check_step) >= 5:
-                        should_check_contacts = True
+            # 防止同一时间步重复查询
+            if (self._global_step - self._last_contact_check_step) < 1:
+                should_check_contacts = False
         except Exception:
-            pass
+            should_check_contacts = True
 
         # 1. selfCollision检测 (Webots) - 仅在触发条件满足时进行昂贵查询
         if should_check_contacts and self.robot_node:
@@ -1136,11 +1222,30 @@ class ROSbotNavigationEnv(gym.Env):
                     name_field = other_node.getField("name")
                     if name_field:
                         other_node_name = name_field.getSFString()
-                    # 正常车轮-地面接触判定
-                    is_ground_contact = other_node_name in self.ground_defs
-                    is_at_floor_level = abs(contact_z_height) < 0.01
+                    # 若缺省名称，尝试使用 DEF 名称作为回退
+                    if not other_node_name:
+                        try:
+                            other_node_name = other_node.getDef() or ""
+                        except Exception:
+                            other_node_name = ""
+                    # 正常车轮-地面接触判定（名称统一为小写比较）
+                    other_label = other_node_name.strip().lower()
+                    ground_set = set(s.strip().lower() for s in getattr(self, 'ground_defs', {'floor'}))
+                    is_ground_contact = other_label in ground_set
+                    # 放宽地面高度容差，避免由于数值抖动导致误判
+                    is_at_floor_level = abs(contact_z_height) < 0.02
                     if is_ground_contact and is_at_floor_level:
                         continue
+                    # 其余接触一律视为碰撞
+                    try:
+                        self._last_collision_info = {
+                            'type': 'contact_point',
+                            'node': other_label,
+                            'z': float(contact_z_height),
+                            'step': int(self._global_step)
+                        }
+                    except Exception:
+                        self._last_collision_info = {'type': 'contact_point'}
                     collision_detected = True
                     break
             except Exception as e:
@@ -1148,24 +1253,59 @@ class ROSbotNavigationEnv(gym.Env):
                 # print(f"通过getContactPoints检测碰撞时发生错误: {e}")
                 pass
 
+        # 回退：若接触点未检测到碰撞，使用距离传感器阈值作为补充
+        if not collision_detected:
+            try:
+                threshold = getattr(self, 'collision_distance_threshold', 0.05)
+                for sensor in getattr(self, 'collision_sensors', []) or []:
+                    value = sensor.getValue()
+                    if value is not None and value < threshold:
+                        try:
+                            self._last_collision_info = {
+                                'type': 'proximity',
+                                'sensor': getattr(sensor, 'getName', lambda: 'unknown')(),
+                                'value': float(value),
+                                'threshold': float(threshold),
+                                'step': int(self._global_step)
+                            }
+                        except Exception:
+                            self._last_collision_info = {'type': 'proximity'}
+                        collision_detected = True
+                        break
+            except Exception:
+                pass
+
         if collision_detected:
+            try:
+                self._debug(f"termination: collision detected, info={getattr(self, '_last_collision_info', None)}")
+            except Exception:
+                pass
             return True
         
         # 2. 到达目标
         current_pos = self._get_sup_position()
         current_distance = np.linalg.norm(current_pos - self.task_info['target_pos'])
         if current_distance < self.success_threshold:
-            # print(f"成功到达目标点！距离: {current_distance:.4f}m")
+            try:
+                self._debug(f"termination: success, distance={current_distance:.4f} < {self.success_threshold}")
+            except Exception:
+                pass
             return True
         
         # 3. 新增：原地打转终止条件
         if self.reward_functions.is_excessive_spin():
-            # print(f"检测到原地打转超过阈值，任务终止。")
+            try:
+                self._debug("termination: excessive spin detected")
+            except Exception:
+                pass
             return True
         
         # 4. 超时/步数限制
         if len(self.trajectory) > self.max_steps_per_episode:
-            # print("超过最大步数限制，任务终止。")
+            try:
+                self._debug(f"termination: max steps exceeded ({len(self.trajectory)} > {self.max_steps_per_episode})")
+            except Exception:
+                pass
             return True
             
         return False
@@ -1175,6 +1315,10 @@ class ROSbotNavigationEnv(gym.Env):
         # 位置边界检查
         current_pos = self._get_sup_position() # self.amcl_result['position_estimated']
         if abs(current_pos[0]) > 20 or abs(current_pos[1]) > 20:
+            try:
+                self._debug(f"truncation: out_of_bounds pos=({current_pos[0]:.2f},{current_pos[1]:.2f})")
+            except Exception:
+                pass
             return True
             
         return False
@@ -1196,7 +1340,8 @@ class ROSbotNavigationEnv(gym.Env):
             'trajectory_length': len(self.trajectory),
             'close_to_target': distance_to_target < 0.5,  # 接近目标标志
             'very_close_to_target': distance_to_target < 0.25,  # 非常接近目标
-            'cargo_type': self.cargo_type
+            'cargo_type': self.cargo_type,
+            'last_collision': getattr(self, '_last_collision_info', None)
         }
         
         return info
@@ -1220,8 +1365,15 @@ class ROSbotNavigationEnv(gym.Env):
                     name_field = other_node.getField("name")
                     if name_field:
                         other_node_name = name_field.getSFString()
-                    is_ground_contact = other_node_name in getattr(self, 'ground_defs', {'floor'})
-                    is_at_floor_level = abs(contact_z_height) < 0.01
+                    if not other_node_name:
+                        try:
+                            other_node_name = other_node.getDef() or ""
+                        except Exception:
+                            other_node_name = ""
+                    other_label = other_node_name.strip().lower()
+                    ground_set = set(s.strip().lower() for s in getattr(self, 'ground_defs', {'floor'}))
+                    is_ground_contact = other_label in ground_set
+                    is_at_floor_level = abs(contact_z_height) < 0.02
                     # 过滤正常的轮-地面接触
                     if is_ground_contact and is_at_floor_level:
                         continue
