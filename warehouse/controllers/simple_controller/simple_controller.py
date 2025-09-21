@@ -37,7 +37,7 @@ class RosbotController:
         print("空格: 停止")
         print("Q: 退出")
         print("==========================================")
-        
+
     def init_motors(self):
         """根据Rosbot PROTO文件初始化电机"""
         try:

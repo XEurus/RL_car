@@ -14,16 +14,23 @@ class NavigationUtils:
     
     def __init__(self):
         # 固定的位置坐标
-        self.fixed_positions = {
-            'start': [-5.0, 3.0, 0.0],       # 固定起点
-            'unload': [-5.0, -2.0, 0.0],     # 固定卸货点
-            'dangerous': [5.0, 3.0, 0.0],    # 固定危险货物点
-            'fragile': [5.0, 1.7, 0.0],      # 固定易碎货物点
-            'normal': [5.0, 0.2, 0.0]        # 固定普通货物点
+        self.standard_positions = {
+            'normal_start': [3.0, 0.2, 0.0],
+            'unload_start': [-3.0, -2.0, 0.0],
+            'start': [-5.0, 3.0, 0.0],       # 起点
+            'unload': [-5.0, -2.0, 0.0],     # 卸货点
+            'dangerous': [5.0, 3.0, 0.0],    # 危险货物点
+            'fragile': [5.0, 1.7, 0.0],      # 易碎货物点
+            'normal': [5.0, 0.2, 0.0]        # 普通货物点
         }
         
-        # 位置区域范围 - 用于随机生成目标点
-        self.position_areas = {
+        self.easy_positions_areas = {
+            'dangerous': [5.0, 3.0, 0.0],    # 危险货物点
+            'fragile': [5.0, 1.7, 0.0],      # 易碎货物点
+            'normal': [5.0, 0.2, 0.0]        # 普通货物点
+        }
+
+        self.difficulty_position_areas = {
             'start_area': {
                 'x_min': -5.5, 'x_max': -4.5,
                 'y_min': 2.5, 'y_max': 3.5,
@@ -50,6 +57,8 @@ class NavigationUtils:
                 'z': 0.0
             }
         }
+
+
         
         # 导航任务配置 - 根据货物类型分不同的取货点和目的地
         self.navigation_config = {
@@ -82,12 +91,13 @@ class NavigationUtils:
         
         return [x, y, z]
     
-    def get_navigation_task(self, cargo_type: str, task_stage: str = 'base') -> Tuple[List[float], List[float]]:
+    def get_navigation_task(self, cargo_type: str, difficulty_type: str, task_stage: str = 'base') -> Tuple[List[float], List[float]]:
         """
         根据货物类型和任务阶段获取导航任务
         
         参数:
             cargo_type: 货物类型 ('normal', 'fragile', 'dangerous')
+            difficulty_type: 任务难易程度 ('start', 'easy', 'medium', 'hard')
             task_stage: 任务阶段
                 - 'base': 基础模型训练，从固定起点到各个货物点，再从普通货物点到卸货点
                 - 'dangerous_to_unload': 从危险货物点到卸货点
@@ -102,6 +112,10 @@ class NavigationUtils:
         
         # 根据任务阶段选择起点和终点
         if task_stage == 'base':
+            if difficulty_type == 'start':
+                start_pos = self.fixed_positions['start']
+                target_type = random.choice(['dangerous', 'fragile', 'normal'])
+                target_pos = self.fixed_positions[target_type]
             if random.random() < 0.5:
                 # 从起点到各个货物点
                 if self.use_random_targets:
@@ -117,7 +131,8 @@ class NavigationUtils:
                 # 从普通货物点到卸货点
                 if self.use_random_targets:
                     start_pos = self._generate_random_position_in_area('normal_area')
-                    target_pos = self._generate_random_position_in_area('unload_area')
+                    target_pos = self.fixed_positions['unload']
+                    #target_pos = self._generate_random_position_in_area('unload_area')
                 else:
                     start_pos = self.fixed_positions['normal']
                     target_pos = self.fixed_positions['unload']
@@ -240,19 +255,6 @@ class NavigationUtils:
             heading += 2 * math.pi
         return heading
     
-    def interpolate_positions(self, start: List[float], end: List[float], num_points: int) -> List[List[float]]:
-        """在两点间插值生成路径点"""
-        start = np.array(start)
-        end = np.array(end)
-        waypoints = []
-        
-        for i in range(num_points + 1):
-            t = i / num_points
-            point = start + t * (end - start)
-            waypoints.append(point.tolist())
-        
-        return waypoints
-    
     def generate_random_position(self) -> List[float]:
         """生成随机有效位置"""
         return [
@@ -275,88 +277,6 @@ class NavigationUtils:
             
             if self.is_position_valid(new_pos):
                 return new_pos
-    
-    def save_config(self, file_path: str):
-        """保存导航配置"""
-        config_data = {
-            'navigation_config': self.navigation_config,
-            'env_bounds': self.env_bounds,
-            'created_at': str(np.datetime64('now'))
-        }
-        
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(config_data, f, indent=2, ensure_ascii=False)
-    
-    def load_config(self, file_path: str):
-        """加载导航配置"""
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                config_data = json.load(f)
-            
-            self.navigation_config = config_data['navigation_config']
-            self.env_bounds = config_data['env_bounds']
-            
-            print(f"成功加载导航配置文件: {file_path}")
-            
-        except FileNotFoundError:
-            print(f"导航配置文件不存在: {file_path}，使用默认配置")
-        except Exception as e:
-            print(f"加载配置文件失败: {e}，使用默认配置")
-    
-    def verify_task_feasibility(self, start: List[float], target: List[float], 
-                              obstacles: List[List[float]] = None) -> Dict:
-        """验证任务可行性"""
-        # 检查边界
-        if not (self.is_position_valid(start) and self.is_position_valid(target)):
-            return {
-                'feasible': False,
-                'reason': '位置超出有效范围',
-                'start_valid': self.is_position_valid(start),
-                'target_valid': self.is_position_valid(target)
-            }
-        
-        # 检查是否可以直线到达
-        distance = self.calculate_distance(start, target)
-        
-        # 简单的障碍物检查
-        if obstacles:
-            collision_count = 0
-            for obstacle in obstacles:
-                obstacle_distance_to_path = self._point_to_line_distance(obstacle, start, target)
-                if obstacle_distance_to_path < 0.2:  # 20cm安全距离
-                    collision_count += 1
-            
-            if collision_count > 0:
-                return {
-                    'feasible': False,
-                    'reason': f'路径上有{collision_count}个障碍物碰撞',
-                    'distance': distance,
-                    'collision_count': collision_count
-                }
-        
-        return {
-            'feasible': True,
-            'distance': distance,
-            'estimated_time': distance / 0.8  # 假设平均速度0.8m/s
-        }
-    
-    def _point_to_line_distance(self, point: List[float], line_start: List[float], 
-                               line_end: List[float]) -> float:
-        """计算点到线段的距离"""
-        # 向量计算
-        line_vec = np.array(line_end) - np.array(line_start)
-        point_vec = np.array(point) - np.array(line_start)
-        
-        # 投影计算
-        line_len_sq = np.dot(line_vec, line_vec)
-        if line_len_sq == 0:
-            return np.linalg.norm(point_vec)
-        
-        t = max(0, min(1, np.dot(point_vec, line_vec) / line_len_sq))
-        projection = np.array(line_start) + t * line_vec
-        
-        return np.linalg.norm(np.array(point) - projection)
-
 
 class NavigationTaskGenerator:
     """导航任务生成器 - 用于训练和测试"""
@@ -457,6 +377,3 @@ class NavigationTaskGenerator:
             return 'hard'
         else:
             return 'medium'
-
-
-import math  # 确保math模块被导入

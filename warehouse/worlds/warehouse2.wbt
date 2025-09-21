@@ -52,6 +52,17 @@ DEF rosbot Rosbot {
   controller "<extern>"
   supervisor TRUE
   selfCollision TRUE
+  cameraSlot [ 
+    Astra { 
+      name "camera" 
+      enableColorCamera TRUE
+      enableDepthCamera TRUE
+      width 640
+      height 480
+      fieldOfView 1.0
+      noise 0.0
+    }
+  ]
 }
 Table {
   translation 0 -3.5 0
