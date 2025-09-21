@@ -8,16 +8,14 @@ from gymnasium import spaces
 import numpy as np
 import math
 import os
-from typing import Dict, Tuple, List, Optional
-from collections import deque
+from typing import Optional, Tuple, Dict, Any
+from controller import Supervisor, GPS, InertialUnit, Gyro, Compass
+from pathlib import Path
 
-from torch import normal
-
-from ..localization.amcl_localizer import AMCLLocalizer
-from ..localization.pose_estimator import RobustPoseEstimator
+# 导入自定义模块
 from ..utils.navigation_utils import NavigationUtils
 from ..utils.reward_functions import RewardFunctions
-from controller import Supervisor, GPS, InertialUnit, Gyro, Compass
+from .local_map_obs import LocalMapObservation
 WEBOTS_AVAILABLE = True
 
 
@@ -37,39 +35,57 @@ class ROSbotNavigationEnv(gym.Env):
     """
     @staticmethod
     def get_spaces():
-        """无需连接 Webots，返回与环境一致的观测/动作空间定义"""
+        """无需连接 Webots，返回与环境一致的多输入观测/动作空间定义"""
         pi = math.pi
-        obs_low = np.array(
-            [0.0] * 20 +
-            [-20.0, -20.0, -2.0] +
-            [-pi, -pi, -pi] +
-            [-2.0, -2.0, -2.0] +
-            [-2.0, -2.0] +
-            [-1.0] +
-            [-20.0, -20.0, -2.0] +
-            [-20.0, -20.0, -2.0] +
-            [-pi] +
-            [-pi] +
-            [-2.0] +
-            [-1.0],
-            dtype=np.float32
-        )
-        obs_high = np.array(
-            [1.0] * 20 +
-            [20.0, 20.0, 2.0] +
-            [pi, pi, pi] +
-            [2.0, 2.0, 2.0] +
-            [2.0, 2.0] +
-            [1.0] +
-            [20.0, 20.0, 2.0] +
-            [20.0, 20.0, 2.0] +
-            [pi] +
-            [pi] +
-            [2.0] +
-            [1.0],
-            dtype=np.float32
-        )
-        obs_space = spaces.Box(low=obs_low, high=obs_high, dtype=np.float32)
+        
+        # 多输入观测空间定义
+        obs_space = spaces.Dict({
+            # 局部地图 - 从LiDAR数据生成
+            'local_map': spaces.Box(
+                low=-1.0, high=100.0,
+                shape=(1, 200, 200),
+                dtype=np.float32
+            ),
+            # 机器人状态信息 (12维)
+            'robot_state': spaces.Box(
+                low=np.array([
+                    -20.0, -20.0, -2.0,    # 位置(3)
+                    -pi, -pi, -pi,          # 姿态(3)
+                    -2.0, -2.0, -2.0,      # 速度(3)
+                    -2.0, -2.0,             # 上一时刻速度(2)
+                    -1.0                    # 加速度(1)
+                ]),
+                high=np.array([
+                    20.0, 20.0, 2.0,       # 位置(3)
+                    pi, pi, pi,             # 姿态(3)
+                    2.0, 2.0, 2.0,         # 速度(3)
+                    2.0, 2.0,               # 上一时刻速度(2)
+                    1.0                     # 加速度(1)
+                ]),
+                dtype=np.float32
+            ),
+            # 导航信息 (10维: 6维目标导航 + 4维航向控制)
+            'navigation_info': spaces.Box(
+                low=np.array([
+                    -20.0, -20.0, -2.0,    # 目标相对位置(3)
+                    -20.0, -20.0, -2.0,    # 起点位置(3)
+                    -pi,                    # 航向偏差(1)
+                    -pi,                    # 目标航向角(1)
+                    -2.0,                   # 角速度(1)
+                    -1.0                    # 角加速度(1)
+                ]),
+                high=np.array([
+                    20.0, 20.0, 2.0,       # 目标相对位置(3)
+                    20.0, 20.0, 2.0,       # 起点位置(3)
+                    pi,                     # 航向偏差(1)
+                    pi,                     # 目标航向角(1)
+                    2.0,                    # 角速度(1)
+                    1.0                     # 角加速度(1)
+                ]),
+                dtype=np.float32
+            )
+        })
+        
         # 修改为10维动作空间（5个子动作，每个子动作2维：左右轮速度百分比，范围0-1）
         act_space = spaces.Box(
             low=np.array([0.0, 0.0] * 5, dtype=np.float32),
@@ -98,47 +114,63 @@ class ROSbotNavigationEnv(gym.Env):
         # 启用初始朝向目标
         self._rotate_to_target_on_reset = True
         
-        # 42维状态空间定义
+        # 多输入观测空间定义 - 使用Dict格式支持MultiInputPolicy
         pi = math.pi
-        self.observation_space = spaces.Box(
-            low=np.array(
-                # LiDAR数据 (20维) - 归一化后
-                [0.0] * 20 +
-                # 机器人位姿状态 (12维)
-                [-20.0, -20.0, -2.0] +  # 位置(3)
-                [-pi, -pi, -pi] +       # 姿态(3)
-                [-2.0, -2.0, -2.0] +    # 速度(3)
-                [-2.0, -2.0] +          # 上一时刻速度(2)
-                [-1.0] +                # 加速度(1)
-                # 目标导航信息 (6维)
-                [-20.0, -20.0, -2.0] +  # 目标相对位置(3)
-                [-20.0, -20.0, -2.0] +  # 起点位置(3)
-                # 航向控制 (4维)
-                [-pi] +                 # 航向偏差(1)
-                [-pi] +                 # 目标航向角(1)
-                [-2.0] +                # 角速度(1)
-                [-1.0]                  # 角加速度(1)
-            ),
-            high=np.array(
-                # LiDAR数据 (20维) - 归一化后
-                [1.0] * 20 +
-                # 机器人位姿状态 (12维)
-                [20.0, 20.0, 2.0] +     # 位置(3)
-                [pi, pi, pi] +          # 姿态(3)
-                [2.0, 2.0, 2.0] +       # 速度(3)
-                [2.0, 2.0] +            # 上一时刻速度(2)
-                [1.0] +                 # 加速度(1)
-                # 目标导航信息 (6维)
-                [20.0, 20.0, 2.0] +     # 目标相对位置(3)
-                [20.0, 20.0, 2.0] +     # 起点位置(3)
-                # 航向控制 (4维)
-                [pi] +                  # 航向偏差(1)
-                [pi] +                  # 目标航向角(1)
-                [2.0] +                 # 角速度(1)
-                [1.0]                   # 角加速度(1)
-            ),
-            dtype=np.float32
+        
+        # 初始化局部地图观测器
+        self.local_map_obs = LocalMapObservation(
+            map_size=200,
+            resolution=0.1,  # 10cm分辨率
+            max_range=10.0
         )
+        
+        # 定义多输入观测空间
+        self.observation_space = spaces.Dict({
+            # 局部地图 - 从LiDAR数据生成
+            'local_map': spaces.Box(
+                low=-1.0, high=100.0,
+                shape=(1, 200, 200),
+                dtype=np.float32
+            ),
+            # 机器人状态信息 (12维)
+            'robot_state': spaces.Box(
+                low=np.array([
+                    -20.0, -20.0, -2.0,    # 位置(3)
+                    -pi, -pi, -pi,          # 姿态(3)
+                    -2.0, -2.0, -2.0,      # 速度(3)
+                    -2.0, -2.0,             # 上一时刻速度(2)
+                    -1.0                    # 加速度(1)
+                ]),
+                high=np.array([
+                    20.0, 20.0, 2.0,       # 位置(3)
+                    pi, pi, pi,             # 姿态(3)
+                    2.0, 2.0, 2.0,         # 速度(3)
+                    2.0, 2.0,               # 上一时刻速度(2)
+                    1.0                     # 加速度(1)
+                ]),
+                dtype=np.float32
+            ),
+            # 导航信息 (10维: 6维目标导航 + 4维航向控制)
+            'navigation_info': spaces.Box(
+                low=np.array([
+                    -20.0, -20.0, -2.0,    # 目标相对位置(3)
+                    -20.0, -20.0, -2.0,    # 起点位置(3)
+                    -pi,                    # 航向偏差(1)
+                    -pi,                    # 目标航向角(1)
+                    -2.0,                   # 角速度(1)
+                    -1.0                    # 角加速度(1)
+                ]),
+                high=np.array([
+                    20.0, 20.0, 2.0,       # 目标相对位置(3)
+                    20.0, 20.0, 2.0,       # 起点位置(3)
+                    pi,                     # 航向偏差(1)
+                    pi,                     # 目标航向角(1)
+                    2.0,                    # 角速度(1)
+                    1.0                     # 角加速度(1)
+                ]),
+                dtype=np.float32
+            )
+        })
         
         # 动作空间 - 10维（5个子动作，每个子动作2维）
         # 现在改为控制左右轮速度百分比，范围0-1：
@@ -223,11 +255,6 @@ class ROSbotNavigationEnv(gym.Env):
         #     num_particles=800,
         #     initial_std=[0.2, 0.2, 0.15]
         # )
-        
-        # 辅助定位器（备用/融合）
-        
-        self.pose_estimator = RobustPoseEstimator(self.supervisor)
-        
         # 导航工具
         self.nav_utils = NavigationUtils()
         
@@ -390,6 +417,9 @@ class ROSbotNavigationEnv(gym.Env):
         _pos = self._get_sup_position()
         _orient = self._get_sup_orientation()
         self.reward_functions.reset(_pos, _orient)
+        
+        # 重置终止标志
+        self._reward_terminate_flag = False
         
         # 如果电机存在，重置电机速度为0
         if hasattr(self, 'fl_motor') and self.fl_motor:
@@ -865,28 +895,38 @@ class ROSbotNavigationEnv(gym.Env):
         return left_wheel_speed, right_wheel_speed
     
     def _get_observation(self):
-        """获取42维观察值"""
-        observation = np.zeros(42, dtype=np.float32)
+        """获取多输入观察值 - 返回字典格式"""
+        # 1. 获取LiDAR数据
+        lidar_normalized, lidar_data = self._get_lidar_data()
         
-        # 1. LiDAR数据 (0-19)
-        observation[0:20],lidar_data = self._get_lidar_data()
+        # 2. 生成局部地图
+        robot_pos = self._get_sup_position()
+        robot_orientation = self._get_sup_orientation()
+        robot_pose = (robot_pos[0], robot_pos[1], robot_orientation[2])  # (x, y, theta)
         
-        # 2. AMCL定位结果 (20-31) - 核心改进
-        # amcl_state = self._get_amcl_state()
-        # observation[20:32] = amcl_state
-        # 使用supervisor数据替代AMCL
-        supervisor_pose_state = self._get_supervisor_pose_state()
-        observation[20:32] = supervisor_pose_state
+        local_map = self.local_map_obs.lidar_to_local_map(
+            lidar_data, robot_pose
+        )
+        # 确保形状为 (1, 200, 200)
+        if local_map.ndim == 2:
+            local_map = local_map[np.newaxis, :, :]
         
-        # 3. 目标导航信息 (32-37)
-        nav_info = self._get_navigation_info()
-        observation[32:38] = nav_info
+        # 3. 获取机器人状态信息 (12维)
+        robot_state = self._get_supervisor_pose_state()
         
-        # 4. 航向控制信息 (38-41)
-        heading_info = self._get_heading_info()
-        observation[38:42] = heading_info
+        # 4. 获取导航信息 (6维) + 航向控制信息 (4维) = 10维
+        nav_info = self._get_navigation_info()  # 6维
+        heading_info = self._get_heading_info()  # 4维
+        navigation_info = np.concatenate([nav_info, heading_info])
         
-        return observation,lidar_data
+        # 返回多输入字典格式
+        observation = {
+            'local_map': local_map.astype(np.float32),
+            'robot_state': robot_state.astype(np.float32),
+            'navigation_info': navigation_info.astype(np.float32)
+        }
+        
+        return observation, lidar_data
     
     def _get_supervisor_pose_state(self):
         """获取基于supervisor的位姿状态 (12维), 模拟amcl_state的输出"""
@@ -1148,16 +1188,26 @@ class ROSbotNavigationEnv(gym.Env):
             'episode_steps': self.episode_steps,
             'cargo_type': self.cargo_type,
             'success_threshold': self.success_threshold,
-            'task_info': self.task_info
+            'task_info': self.task_info,
+            'terminate': False  # 初始化终止标志
         }
         
         # 调用奖励函数计算奖励
-        return self.reward_functions.calculate_reward(action, observation, env_state)
+        reward = self.reward_functions.calculate_reward(action, observation, env_state)
+        
+        # 检查奖励函数是否设置了终止标志
+        self._reward_terminate_flag = env_state.get('terminate', False)
+        
+        return reward
     
     # 货物专用奖励函数已移至reward_functions.py
     
     def _check_termination(self):
         """检查终止条件"""
+        # 首先检查奖励函数是否已经决定终止（碰撞或卡住检测）
+        if hasattr(self, '_reward_terminate_flag') and self._reward_terminate_flag:
+            return True
+            
         collision_detected = False
 
         # 全局步计数与朝向历史初始化
@@ -1309,7 +1359,8 @@ class ROSbotNavigationEnv(gym.Env):
             return True
             
         return False
-    
+
+
     def _check_truncation(self):
         """检查截断条件"""
         # 位置边界检查

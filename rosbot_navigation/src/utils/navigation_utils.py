@@ -102,7 +102,7 @@ class NavigationUtils:
         
         # 根据任务阶段选择起点和终点
         if task_stage == 'base':
-            if random.random() < 0.5:
+            if random.random() < 0:
                 # 从起点到各个货物点
                 if self.use_random_targets:
                     start_pos = self._generate_random_position_in_area('start_area')
@@ -117,7 +117,8 @@ class NavigationUtils:
                 # 从普通货物点到卸货点
                 if self.use_random_targets:
                     start_pos = self._generate_random_position_in_area('normal_area')
-                    target_pos = self._generate_random_position_in_area('unload_area')
+                    target_pos = self.fixed_positions['unload']
+                    #target_pos = self._generate_random_position_in_area('unload_area')
                 else:
                     start_pos = self.fixed_positions['normal']
                     target_pos = self.fixed_positions['unload']

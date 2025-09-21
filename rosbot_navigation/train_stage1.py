@@ -121,12 +121,12 @@ def _actor_process(rank: int, cargo_type: str, args: argparse.Namespace, obs_q: 
             # 1) 将观测放入队列，请求一个动作
             try:
                 obs_q.put((rank, obs), timeout=0.1)
-                if int(time.time()) % 5 == 0:
+                if int(time.time()) % 1 == 0:
                     img = env.render_map()  # 返回的是OpenCV图像 (H, W, 3)
                     # 可选：显示或保存
                     cv2.imshow("Local Map", img)
                     cv2.waitKey(1)
-                    # cv2.imwrite("local_map.png", img)
+                   #cv2.imwrite("local_map.png", img)
             except Full:
                 # 观测队列满了，Learner 暂未处理，稍后再试，避免阻塞
                 time.sleep(0.001)
@@ -444,11 +444,7 @@ def _learner_process(args: argparse.Namespace, model_path: str, obs_queues: list
 
     fake_env = _FakeEnv(obs_space, act_space)
     print(f"{obs_space}, {act_space}")
-    
-    # 确保日志目录存在
     log_dir = "./logs/"
-    os.makedirs(log_dir, exist_ok=True)
-    
     model = TD3(
                 'CnnPolicy',
                 fake_env,
@@ -465,17 +461,13 @@ def _learner_process(args: argparse.Namespace, model_path: str, obs_queues: list
                 target_noise_clip=getattr(args, 'noise_clip', 0.5),
                 verbose=1,
                 device=device,
-                tensorboard_log=None,  # 禁用tensorboard日志以避免_logger问题
+                tensorboard_log=log_dir,
                 policy_kwargs={
                     'features_extractor_kwargs': {
                         'normalized_image': True
                     }
                 }
     )
-    
-    # 手动设置日志记录器以避免_logger属性缺失问题
-    from stable_baselines3.common.logger import configure
-    model.set_logger(configure(log_dir, ["stdout", "csv", "tensorboard"]))
 
     # model = ImprovedTD3(
     #     "MlpPolicy",
@@ -1066,7 +1058,7 @@ def main():
                        help='计算设备 (e.g., "cpu", "cuda", "auto")')
     parser.add_argument('--debug', type=bool, default=False, help='调试模式')
     # 日志与异步控制now=datetime.now()
-    parser.add_argument('--log_interval', type=int, default=1000, help='控制台打印间隔步数')
+    parser.add_argument('--log_interval', type=int, default=200, help='控制台打印间隔步数')
     parser.add_argument('--mlflow_log_interval', type=int, default=500, help='MLflow 记录间隔步数')
     parser.add_argument('--async_vec', type=bool, default=True, help='是否使用异步向量环境以减少最慢实例拖慢')
     parser.add_argument('--prelaunch_webots', type=bool, default=True, help='是否在主进程串行预启动 Webots 实例以避免并发启动卡顿')
@@ -1075,7 +1067,7 @@ def main():
     parser.add_argument('--num_actors', type=int, default=1, help='Actor 数量')
     # 并行/实例与Webots相关参数
     parser.add_argument('--num_envs', type=int, default=1, help='并行环境数量（>1启用多进程并行）')
-    parser.add_argument('--world', type=str, default='/root/workspace/RL_car2/warehouse/worlds/warehouse2.wbt', help='Webots world 文件路径')
+    parser.add_argument('--world', type=str, default='/root/workspace/RL_car2/warehouse/worlds/warehouse3.wbt', help='Webots world 文件路径')
     parser.add_argument('--headless', type=bool,default=True, help='以无渲染/批处理模式启动 Webots')
     parser.add_argument('--fast_mode', type=bool,default=True, help='使用Webots FAST模式')
     parser.add_argument('--no-rendering',type=bool,default=True, help='渲染模式')
@@ -1085,17 +1077,17 @@ def main():
     parser.add_argument('--seed', type=int, default=0, help='随机种子')
     
     # TD3算法相关参数
-    parser.add_argument('--learning_rate', type=float, default=1e-4, help='学习率')
+    parser.add_argument('--learning_rate', type=float, default=5e-4, help='学习率')
     parser.add_argument('--buffer_size', type=int, default=50000, help='经验回放缓冲区大小')
     parser.add_argument('--learning_starts', type=int, default=1000, help='预热步数，开始学习前收集的样本数量')
     parser.add_argument('--batch_size', type=int, default=256, help='批处理大小')
-    parser.add_argument('--gamma', type=float, default=0.95, help='折扣因子')
-    parser.add_argument('--tau', type=float, default=0.003, help='目标网络软更新系数')
+    parser.add_argument('--gamma', type=float, default=0.99, help='折扣因子')
+    parser.add_argument('--tau', type=float, default=0.005, help='目标网络软更新系数')
     parser.add_argument('--gradient_steps', type=int, default=1, help='每步梯度更新次数')
     parser.add_argument('--train_freq', type=int, default=1, help='训练频率')
     parser.add_argument('--policy_delay', type=int, default=2, help='策略延迟更新步数')
     parser.add_argument('--target_noise', type=float, default=0.1, help='目标策略噪声')
-    parser.add_argument('--noise_clip', type=float, default=0.5, help='噪声裁剪范围')
+    parser.add_argument('--noise_clip', type=float, default=0.3, help='噪声裁剪范围')
     
     args = parser.parse_args()
     
@@ -1118,7 +1110,7 @@ def main():
         config_dict = vars(args)
         # 加入启动时间和备注信息
         config_dict['start_time'] = now.strftime("%Y-%m-%d %H:%M:%S")
-        config_dict['remark'] = "使用cnn"
+        config_dict['remark'] = "测试"
         yaml.dump(config_dict, f)
     
     args.experiment_name = f"{now}_{args.cargo_type}_{args.total_steps}_{config_dict['remark']}"
