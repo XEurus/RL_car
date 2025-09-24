@@ -20,7 +20,8 @@ class LocalMapObservation:
     def __init__(self, 
                  map_size: int = 200,  # 地图大小 (像素)
                  resolution: float = 0.1,  # 分辨率 (米/像素)
-                 max_range: float = 10.0):  # 最大探测距离 (米)
+                 max_range: float = 10.0,  # 最大探测距离 (米)
+                 align_with_robot_pose: bool = False):  # 是否按机器人位姿对齐
         """
         初始化局部地图观测空间
         
@@ -32,6 +33,7 @@ class LocalMapObservation:
         self.map_size = map_size
         self.resolution = resolution
         self.max_range = max_range
+        self.align_with_robot_pose = bool(align_with_robot_pose)
         
         # 地图物理尺寸 (米)
         self.map_physical_size = map_size * resolution  # 10m x 10m
@@ -83,17 +85,18 @@ class LocalMapObservation:
                 
             # 计算激光束角度 (相对于机器人朝向)
             angle = angle_min + i * angle_increment
-            
-            # 计算激光束在世界坐标系中的角度
-            world_angle = angle + robot_pose[2]
-            
-            # 计算激光束终点坐标
-            end_x = robot_pose[0] + range_val * math.cos(world_angle)
-            end_y = robot_pose[1] + range_val * math.sin(world_angle)
-            
-            # 转换为地图像素坐标
-            end_x_pixel = int((end_x - robot_pose[0] + self.map_physical_size/2) / self.resolution)
-            end_y_pixel = int((end_y - robot_pose[1] + self.map_physical_size/2) / self.resolution)
+            if self.align_with_robot_pose:
+                # 使用机器人朝向旋转射线
+                world_angle = angle + robot_pose[2]
+                dx = range_val * math.cos(world_angle)
+                dy = range_val * math.sin(world_angle)
+            else:
+                # 忽略机器人朝向与位置，固定以机器人中心为原点，角度不随姿态变化
+                dx = range_val * math.cos(angle)
+                dy = range_val * math.sin(angle)
+            # 转换为相对于机器人中心的地图像素坐标
+            end_x_pixel = int((dx + self.map_physical_size/2) / self.resolution)
+            end_y_pixel = int((dy + self.map_physical_size/2) / self.resolution)
             
             # 确保坐标在地图范围内
             end_x_pixel = np.clip(end_x_pixel, 0, self.map_size - 1)
