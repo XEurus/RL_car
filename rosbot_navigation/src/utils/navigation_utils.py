@@ -66,19 +66,19 @@ class NavigationUtils:
 
         self.woodenbox_area_env1 = {
             'forbidden_zones': [
-                {'center': [-0.531454, 1.8261, 0.0], 'radius': 0.4},
-                {'center': [0.80243, 0.972897, 0.0], 'radius': 0.4},
-                {'center': [1.75897, -1.68178, 0.0], 'radius': 0.4},
-                {'center': [2.11678, 1.97471, 0.0], 'radius': 0.4},
-                {'center': [1.00292, 2.79978, 0.0], 'radius': 0.4},
-                {'center': [2.31996, 0.102915, 0.0], 'radius': 0.4},
-                {'center': [-0.875248, 0.292079, 0.0], 'radius': 0.4},
-                {'center': [0.824845, -0.581012, 0.0], 'radius': 0.4},
-                {'center': [-2.57865, 0.177985, 0.0], 'radius': 0.4},
-                {'center': [-1.57535, 3.02372, 0.0], 'radius': 0.4},
-                {'center': [-2.44712, 1.63647, 0.0], 'radius': 0.4},
-                {'center': [-0.331992, -1.4555, 0.0], 'radius': 0.4},
-                {'center': [-2.03615, -1.49171, 0.0], 'radius': 0.4},
+                {'center': [-0.531454, 1.8261, 0.0], 'radius': 0.45},
+                {'center': [0.80243, 0.972897, 0.0], 'radius': 0.45},
+                {'center': [1.75897, -1.68178, 0.0], 'radius': 0.45},
+                {'center': [2.11678, 1.97471, 0.0], 'radius': 0.45},
+                {'center': [1.00292, 2.79978, 0.0], 'radius': 0.45},
+                {'center': [2.31996, 0.102915, 0.0], 'radius': 0.45},
+                {'center': [-0.875248, 0.292079, 0.0], 'radius': 0.45},
+                {'center': [0.824845, -0.581012, 0.0], 'radius': 0.45},
+                {'center': [-2.57865, 0.177985, 0.0], 'radius': 0.45},
+                {'center': [-1.57535, 3.02372, 0.0], 'radius': 0.45},
+                {'center': [-2.44712, 1.63647, 0.0], 'radius': 0.45},
+                {'center': [-0.331992, -1.4555, 0.0], 'radius': 0.45},
+                {'center': [-2.03615, -1.49171, 0.0], 'radius': 0.45},
                 # WoodenPalletStack (from warehouse5_env1.wbt)
                 {'center': [5.00669, -3.36607, 0.0], 'radius': 0.8},
                 {'center': [3.55506, -3.30287, 0.0], 'radius': 0.8}
@@ -87,19 +87,19 @@ class NavigationUtils:
 
         self.woodenbox_area_env2 = {
             'forbidden_zones': [
-                {'center': [-0.691454, 2.6961, 0.0], 'radius': 0.4},
-                {'center': [0.99243, 0.132897, 0.0], 'radius': 0.4},
-                {'center': [0.22897, -1.86178, 0.0], 'radius': 0.4},
-                {'center': [1.37678, 1.97471, 0.0], 'radius': 0.4},
-                {'center': [-0.34708, 0.96978, 0.0], 'radius': 0.4},
-                {'center': [2.35996, -0.757085, 0.0], 'radius': 0.4},
-                {'center': [-2.42525, 0.182079, 0.0], 'radius': 0.4},
-                {'center': [-0.81516, -0.751012, 0.0], 'radius': 0.4},
-                {'center': [-2.20865, 2.00798, 0.0], 'radius': 0.4},
-                {'center': [-3.21535, 3.35372, 0.0], 'radius': 0.4},
-                {'center': [-3.85712, 1.68647, 0.0], 'radius': 0.4},
-                {'center': [-3.66199, -1.3955, 0.0], 'radius': 0.4},
-                {'center': [-4.60615, -0.041712, 0.0], 'radius': 0.4},
+                {'center': [-0.691454, 2.6961, 0.0], 'radius': 0.45},
+                {'center': [0.99243, 0.132897, 0.0], 'radius': 0.45},
+                {'center': [0.22897, -1.86178, 0.0], 'radius': 0.45},
+                {'center': [1.37678, 1.97471, 0.0], 'radius': 0.45},
+                {'center': [-0.34708, 0.96978, 0.0], 'radius': 0.45},
+                {'center': [2.35996, -0.757085, 0.0], 'radius': 0.45},
+                {'center': [-2.42525, 0.182079, 0.0], 'radius': 0.45},
+                {'center': [-0.81516, -0.751012, 0.0], 'radius': 0.45},
+                {'center': [-2.20865, 2.00798, 0.0], 'radius': 0.45},
+                {'center': [-3.21535, 3.35372, 0.0], 'radius': 0.45},
+                {'center': [-3.85712, 1.68647, 0.0], 'radius': 0.45},
+                {'center': [-3.66199, -1.3955, 0.0], 'radius': 0.45},
+                {'center': [-4.60615, -0.041712, 0.0], 'radius': 0.45},
                 # WoodenPalletStack (from warehouse5_env1.wbt)
                 {'center': [5.00669, -3.36607, 0.0], 'radius': 0.8},
                 {'center': [3.55506, -3.30287, 0.0], 'radius': 0.8}
@@ -160,7 +160,7 @@ class NavigationUtils:
         
         参数:
             cargo_type: 货物类型 ('normal', 'fragile', 'dangerous')
-            difficulty_type: 任务难易程度 ('start', 'easy', 'medium', 'hard')
+            difficulty_type: 任务难易程度 ('start', 'easy', 'medium', 'hard', 'hard2')
             task_stage: 任务阶段
                 - 'base': 基础模型训练，从固定起点到各个货物点，再从普通货物点到卸货点
                 - 'dangerous_to_unload': 从危险货物点到卸货点
@@ -179,7 +179,7 @@ class NavigationUtils:
                 start_pos = self.fixed_positions['start']
                 target_type = random.choice(['dangerous', 'fragile', 'normal'])
                 target_pos = self.fixed_positions[target_type]
-            if random.random() < 0.5:
+            if random.random() < 0.7:
                 # 从起点到各个货物点
                 if self.use_random_targets:
                     start_pos = self._generate_random_position_in_area('start_area')
@@ -411,20 +411,23 @@ class NavigationUtils:
             start_pos = self.fixed_positions[start_key]
             return start_pos, target_pos, 'align'
 
-        if stage in ('easy', 'medium', 'hard'):
+        if stage in ('easy', 'medium', 'hard', 'hard2'):
             # 分阶段半径范围：easy(2,4), medium(3,5), hard(4,7)
             r_ranges = {
                 'easy': (2.0, 4.0),
-                'medium': (3.0, 5.0),
-                'hard': (4.0, 7.0)
+                'medium': (3.0, 6.0),
+                'hard': (4.0, 8.0),
+                'hard2': (5.0, 10.0)
             }
             r_min, r_max = r_ranges[stage]
             start_pos = self._sample_in_annulus_avoid(center=target_pos, r_min=r_min, r_max=r_max)
             if stage == 'easy':
                 angle_mode = 'exact_noise' 
             elif stage == 'medium':
-                angle_mode = 'axis'
+                angle_mode = 'exact_noise'
             elif stage == 'hard':
+                angle_mode = 'axis'
+            elif stage == 'hard2':
                 angle_mode = 'axis'
             elif stage == 'end':
                 angle_mode = 'axis'

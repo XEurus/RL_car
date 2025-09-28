@@ -23,6 +23,7 @@ from stable_baselines3.common.results_plotter import load_results, ts2xy
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from stable_baselines3 import TD3
 from stable_baselines3.common.logger import configure as sb3_configure
+from stable_baselines3.common.utils import configure_logger as sb3_configure_logger
 
 from src.utils.webots_launcher import start_webots_instance, attach_process_cleanup_to_env
 from functools import partial
@@ -52,12 +53,12 @@ def _actor_process(rank: int, cargo_type: str, args: argparse.Namespace, obs_q: 
         "last_log_time": time.time()
     }
 
-    try:
-        # 初始MLflow跟踪
+    # 初始MLflow跟踪
+    if args.actor_mlflow_tracking:
         experiment_name = getattr(args, 'experiment_name', None) or f"distributed_training_{cargo_type}"
         run_name = f"actor{rank}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        
-        # 设置MLflow实验
+    
+    # 设置MLflow实验
         try:
             mlflow.set_experiment(experiment_name)
             # 开始一个新的MLflow运行
@@ -73,321 +74,311 @@ def _actor_process(rank: int, cargo_type: str, args: argparse.Namespace, obs_q: 
             print(f"[ACTOR{rank}] MLflow 跟踪已初始化: {experiment_name}/{run_name}")
         except Exception as e:
             print(f"[ACTOR{rank}] MLflow 初始化失败: {e}")
-        # 选择本Actor使用的world及环境编号（env1/env2对半分配；只有1个actor则使用env1）
-        env1_world = str(Path('/root/workspace/RL_car2/warehouse/worlds/warehouse5_env1.wbt'))
-        env2_world = str(Path('/root/workspace/RL_car2/warehouse/worlds/warehouse5_env2.wbt'))
-        use_env2 = False
-        try:
-            n_actors = int(getattr(args, 'num_actors', 1))
-            if n_actors <= 1:
-                use_env2 = False
-            else:
-                use_env2 = (rank % 2 == 1)
-        except Exception:
+    # 选择本Actor使用的world及环境编号（env1/env2对半分配；只有1个actor则使用env1）
+    env1_world = str(Path('/root/workspace/RL_car2/warehouse/worlds/warehouse5_env1.wbt'))
+    env2_world = str(Path('/root/workspace/RL_car2/warehouse/worlds/warehouse5_env2.wbt'))
+    use_env2 = False
+    try:
+        n_actors = int(getattr(args, 'num_actors', 1))
+        if n_actors <= 1:
+            use_env2 = False
+        else:
             use_env2 = (rank % 2 == 1)
-        world_to_use = env2_world if use_env2 else env1_world
+    except Exception:
+        use_env2 = (rank % 2 == 1)
+    world_to_use = env2_world if use_env2 else env1_world
 
-        # 启动单实例 Webots 并连接
-        for i in range(3): 
-            proc, url = start_webots_instance(
-                instance_id=rank,
-                world_path=world_to_use,
-                headless=args.headless,
-                fast_mode=getattr(args, 'fast_mode', True),
-                no_rendering=args.no_rendering,
-                batch=args.batch,
-                minimize=args.minimize,
-                stdout=True,
-                stderr=True
-            )
-            if proc != -2:
-                break
-        
-        print(f"[ACTOR{rank}] Webots 启动完成，URL: {url}")
-        
-        base_env = ROSbotNavigationEnv(
-            cargo_type=cargo_type,
+    # 启动单实例 Webots 并连接
+    for i in range(3): 
+        proc, url = start_webots_instance(
             instance_id=rank,
-            controller_url=url,
-            fast_mode=(args.fast_mode if args else True),
-            control_period_ms=(args.control_period_ms if args else 200),
-            debug=bool(getattr(args, 'debug', False)),
-            include_robot_state=False,
-            include_navigation_info=True,
-            nav_info_mode='minimal',
-            macro_action_steps=int(getattr(args, 'macro_action_steps', 1)),
-            action_mode=str(getattr(args, 'action_mode', 'wheels')),
-            obs_mode=str(getattr(args, 'obs_mode', 'local_map'))
+            world_path=world_to_use,
+            headless=args.headless,
+            fast_mode=getattr(args, 'fast_mode', True),
+            no_rendering=args.no_rendering,
+            batch=args.batch,
+            minimize=args.minimize,
+            stdout=True,
+            stderr=True
         )
-        # 将训练参数对象传递给环境，供奖励函数使用
-        base_env.args = args
-   
+        if proc != -2:
+            break
+    
+    print(f"[ACTOR{rank}] Webots 启动完成，URL: {url}")
+    
+    base_env = ROSbotNavigationEnv(
+        cargo_type=cargo_type,
+        instance_id=rank,
+        controller_url=url,
+        fast_mode=(args.fast_mode if args else True),
+        control_period_ms=(args.control_period_ms if args else 200),
+        debug=bool(getattr(args, 'debug', False)),
+        include_robot_state=False,
+        include_navigation_info=True,
+        nav_info_mode='minimal',
+        macro_action_steps=int(getattr(args, 'macro_action_steps', 1)),
+        action_mode=str(getattr(args, 'action_mode', 'wheels')),
+        obs_mode=str(getattr(args, 'obs_mode', 'local_map')),
+        enable_speed_smoothing=bool(getattr(args, 'enable_speed_smoothing', True))
+    )
+    # 将训练参数对象传递给环境，供奖励函数使用
+    base_env.args = args
 
-        # 设置环境选择与课程阶段
+
+    # 设置环境选择与课程阶段
+    try:
+        env_tag = 'env2' if use_env2 else 'env1'
+        if hasattr(base_env, 'nav_utils') and base_env.nav_utils:
+            base_env.nav_utils.current_env = env_tag
+            # 配置课程阶段（start/easy/medium/hard/end/all）
+            stage = getattr(args, 'curriculum_stage', 'end')
+            if hasattr(base_env.nav_utils, 'set_stage'):
+                base_env.nav_utils.set_stage(stage)
+            else:
+                base_env.nav_utils.curriculum_stage = stage
+        print(f"[ACTOR{rank}] 使用 {env_tag} ({world_to_use}), 课程阶段: {getattr(args, 'curriculum_stage', 'end')}")
+    except Exception as e:
+        print(f"[ACTOR{rank}] 配置环境标签/阶段失败: {e}")
+
+    # 直接使用多输入基础环境（Dict obs: local_map 固定 + 可选向量）
+    env = base_env
+
+    attach_process_cleanup_to_env(env, proc)
+    print(f"[ACTOR{rank}] 环境初始化完成")
+
+    obs, info = env.reset()
+    print(f"[ACTOR{rank}] 开始采样循环")
+    
+    episode_steps = 0
+    episode_reward = 0.0
+    episode_count = 0
+    start_time = time.time()
+    
+    # 指标已提前初始化
+    
+    # 初始化episode buffer
+    episode_buffer = []
+    # 早停相关：记录最近N次任务是否成功
+    early_stop_window = int(getattr(args, 'early_stop_window', 50))
+    early_stop_threshold = float(getattr(args, 'early_stop_success', 0.90))
+    recent_episode_success = deque(maxlen=early_stop_window)
+    
+    while not stop_event.is_set():
+        # 1) 将观测放入队列，请求一个动作
         try:
-            env_tag = 'env2' if use_env2 else 'env1'
-            if hasattr(base_env, 'nav_utils') and base_env.nav_utils:
-                base_env.nav_utils.current_env = env_tag
-                # 配置课程阶段（start/easy/medium/hard/end/all）
-                stage = getattr(args, 'curriculum_stage', 'end')
-                if hasattr(base_env.nav_utils, 'set_stage'):
-                    base_env.nav_utils.set_stage(stage)
-                else:
-                    base_env.nav_utils.curriculum_stage = stage
-            print(f"[ACTOR{rank}] 使用 {env_tag} ({world_to_use}), 课程阶段: {getattr(args, 'curriculum_stage', 'end')}")
-        except Exception as e:
-            print(f"[ACTOR{rank}] 配置环境标签/阶段失败: {e}")
-
-        # 直接使用多输入基础环境（Dict obs: local_map 固定 + 可选向量）
-        env = base_env
-
-        attach_process_cleanup_to_env(env, proc)
-        print(f"[ACTOR{rank}] 环境初始化完成")
-
-        obs, info = env.reset()
-        print(f"[ACTOR{rank}] 开始采样循环")
-        
-        episode_steps = 0
-        episode_reward = 0.0
-        episode_count = 0
-        start_time = time.time()
-        
-        # 指标已提前初始化
-        
-        # 初始化episode buffer
-        episode_buffer = []
-        # 早停相关：记录最近N次任务是否成功
-        early_stop_window = int(getattr(args, 'early_stop_window', 50))
-        early_stop_threshold = float(getattr(args, 'early_stop_success', 0.90))
-        recent_episode_success = deque(maxlen=early_stop_window)
-        
-        while not stop_event.is_set():
-            # 1) 将观测放入队列，请求一个动作
-            try:
-                obs_q.put((rank, obs), timeout=0.1)
-                # 仅0号环境进行可视化（有图形化界面）
-                if rank == 0 and args.show_map:
-                    try:
-                        # 仅当观测为多输入字典且包含 local_map 时渲染
-                        if isinstance(obs, dict) and ('local_map' in obs):
-                            lmo = LocalMapObservation()
-                            img = lmo.render_map_to_cv_image(obs['local_map'])
-                            cv2.imshow("Local Map (Actor 0)", img)
-                            cv2.waitKey(1)
-                        else:
-                            # lidar 模式：按与模型输入一致的20维向量做柱状图可视化
-                            try:
-                                if isinstance(obs, (list, tuple, np.ndarray)) and len(obs) >= 20 and cv2 is not None:
-                                    vec = np.array(obs[:20], dtype=np.float32)
-                                    h, w = 200, 400
-                                    img = np.ones((h, w, 3), dtype=np.uint8) * 255
-                                    maxv = float(np.max(vec)) if np.max(vec) > 0 else 1.0
-                                    bar_w = w // 20
-                                    for i, v in enumerate(vec):
-                                        bh = int((v / maxv) * (h - 20))
-                                        x1 = i * bar_w
-                                        y1 = h - 10
-                                        x2 = (i + 1) * bar_w - 2
-                                        y2 = h - 10 - bh
-                                        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), -1)
-                                    cv2.imshow("LiDAR Vector (Actor 0)", img)
-                                    cv2.waitKey(1)
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        print(f"[ACTOR{rank}] 观测渲染异常: {e}")
-                        pass
-            except Full:
-                # 观测队列满了，Learner 暂未处理，稍后再试，避免阻塞
-                time.sleep(0.001)
-                continue
-            except Exception as e:
-                print(f"[ACTOR{rank}] 发送观测异常: {e}")
-                raise e
-
-            # 2) 等待 Learner 返回动作（只在成功发送观测后才等待）
-            try:
-                action = act_q.get(timeout=2.0)
-            except Empty:
-                # 未及时获得动作，重试
-                # 不退出循环，避免 actor 过早终止
-                continue
-            except Exception as e:
-                print(f"[ACTOR{rank}] 获取动作异常: {e}")
-                continue
-
-            # 3) 执行动作并写入经验
-            try:
+            obs_q.put((rank, obs), timeout=0.1)
+            # 仅0号环境进行可视化（有图形化界面）
+            if rank == 0 and args.show_map:
                 try:
-                    next_obs, reward, terminated, truncated, info = env.step(action)
+                    # 仅当观测为多输入字典且包含 local_map 时渲染
+                    if isinstance(obs, dict) and ('local_map' in obs):
+                        lmo = LocalMapObservation()
+                        img = lmo.render_map_to_cv_image(obs['local_map'])
+                        cv2.imshow("Local Map (Actor 0)", img)
+                        cv2.waitKey(1)
+                    else:
+                        # lidar 模式：按与模型输入一致的20维向量做柱状图可视化
+                        try:
+                            if isinstance(obs, (list, tuple, np.ndarray)) and len(obs) >= 20 and cv2 is not None:
+                                vec = np.array(obs[:20], dtype=np.float32)
+                                h, w = 200, 400
+                                img = np.ones((h, w, 3), dtype=np.uint8) * 255
+                                maxv = float(np.max(vec)) if np.max(vec) > 0 else 1.0
+                                bar_w = w // 20
+                                for i, v in enumerate(vec):
+                                    bh = int((v / maxv) * (h - 20))
+                                    x1 = i * bar_w
+                                    y1 = h - 10
+                                    x2 = (i + 1) * bar_w - 2
+                                    y2 = h - 10 - bh
+                                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), -1)
+                                cv2.imshow("LiDAR Vector (Actor 0)", img)
+                                cv2.waitKey(1)
+                        except Exception:
+                            pass
                 except Exception as e:
-                    print(f"[ACTOR{rank}] step 异常: {e}")
-                    raise e
-                done = bool(terminated or truncated)
-                
-                # 跟踪奖励和指标
-                episode_reward += reward
-                metrics["steps_completed"] += 1
-                metrics["total_reward"] += reward
-                
-                # 添加距离信息到info
-                distance, _ = env._calculate_distance_to_target()
-                info['distance_to_target'] = distance
-                
-                # 根据配置选择写入时机：逐步写入或按回合结束再写入
-                exp_item = {
-                    'obs': obs.copy(),
-                    'action': action.copy(),
-                    'reward': reward,
-                    'next_obs': next_obs.copy(),
-                    'done': done,
-                    'info': info.copy() if info else {}
-                }
-                if bool(getattr(args, 'enqueue_at_episode_end', True)):
-                    # 先缓存，等待回合结束后统一写入
-                    episode_buffer.append(exp_item)
-                else:
-                    # 立即写入经验队列（不做episode级整形）
-                    try:
-                        exp_q.put((exp_item['obs'], exp_item['action'], exp_item['reward'], exp_item['next_obs'], exp_item['done']), timeout=0.1)
-                    except Full:
-                        pass
-                    except Exception as e:
-                        print(f"[ACTOR{rank}] 写入经验异常: {e}")
-                
-                # 降频记录指标到MLflow
-                current_time = time.time()
-                if current_time - metrics["last_log_time"] >= 10.0:  # 每10秒记录一次
-                    try:
-                        if mlflow.active_run():
-                            mlflow.log_metrics({
-                                "actor_steps": metrics["steps_completed"],
-                                "actor_episodes": metrics["episodes_completed"],
-                                "actor_avg_reward": metrics["avg_episode_reward"],
-                                "actor_total_reward": metrics["total_reward"]
-                            }, step=metrics["steps_completed"])
-                    except Exception as e:
-                        print(f"[ACTOR{rank}] MLflow 记录指标失败: {e}")
-                    metrics["last_log_time"] = current_time
-            except Exception as e:
-                print(f"[ACTOR{rank}] 环境 step 异常: {e}")
-                raise e
-                continue
+                    print(f"[ACTOR{rank}] 观测渲染异常: {e}")
+                    pass
+        except Full:
+            # 观测队列满了，Learner 暂未处理，稍后再试，避免阻塞
+            time.sleep(0.001)
+            continue
+        except Exception as e:
+            print(f"[ACTOR{rank}] 发送观测异常: {e}")
+            raise e
 
-            obs = next_obs
-            episode_steps += 1
-                
-            if done:
+        # 2) 等待 Learner 返回动作（只在成功发送观测后才等待）
+        try:
+            action = act_q.get(timeout=2.0)
+        except Empty:
+            # 未及时获得动作，重试
+            # 不退出循环，避免 actor 过早终止
+            continue
+        except Exception as e:
+            print(f"[ACTOR{rank}] 获取动作异常: {e}")
+            continue
+
+        # 3) 执行动作并写入经验
+
+        next_obs, reward, terminated, truncated, info = env.step(action)
+        done = bool(terminated or truncated)
+        
+        # 跟踪奖励和指标
+        episode_reward += reward
+        metrics["steps_completed"] += 1
+        metrics["total_reward"] += reward
+        
+        # 添加距离信息到info
+        distance, _ = env._calculate_distance_to_target()
+        info['distance_to_target'] = distance
+        
+        # 根据配置选择写入时机：逐步写入或按回合结束再写入
+        exp_item = {
+            'obs': obs.copy(),
+            'action': action.copy(),
+            'reward': reward,
+            'next_obs': next_obs.copy(),
+            'done': done,
+            'info': info.copy() if info else {}
+        }
+        if bool(getattr(args, 'enqueue_at_episode_end', True)):
+            # 先缓存，等待回合结束后统一写入
+            episode_buffer.append(exp_item)
+        else:
+            # 立即写入经验队列（不做episode级整形）
+            try:
+                exp_q.put((exp_item['obs'], exp_item['action'], exp_item['reward'], exp_item['next_obs'], exp_item['done']), timeout=0.1)
+            except Full:
+                pass
+            except Exception as e:
+                print(f"[ACTOR{rank}] 写入经验异常: {e}")
+        
+        # 降频记录指标到MLflow
+        if args.actor_mlflow_tracking:
+            current_time = time.time()
+            if current_time - metrics["last_log_time"] >= 10.0:  # 每10秒记录一次
                 try:
-                    # 记录完成的episode指标
-                    metrics["episodes_completed"] += 1
-                    metrics["avg_episode_reward"] = metrics["total_reward"] / metrics["episodes_completed"]
-                    metrics["max_episode_reward"] = max(metrics["max_episode_reward"], episode_reward)
-                    metrics["min_episode_reward"] = min(metrics["min_episode_reward"], episode_reward)
-                    
-                    # 记录到MLflow
+                    if mlflow.active_run():
+                        mlflow.log_metrics({
+                        "actor_steps": metrics["steps_completed"],
+                        "actor_episodes": metrics["episodes_completed"],
+                        "actor_total_reward": metrics["total_reward"]
+                    }, step=metrics["steps_completed"])
+                except Exception as e:
+                    print(f"[ACTOR{rank}] MLflow 记录指标失败: {e}")
+                metrics["last_log_time"] = current_time
+
+        obs = next_obs
+        episode_steps += 1
+            
+        if done:
+            try:
+                # 记录完成的episode指标
+                metrics["episodes_completed"] += 1
+                metrics["avg_episode_reward"] = metrics["total_reward"] / metrics["episodes_completed"]
+                metrics["max_episode_reward"] = max(metrics["max_episode_reward"], episode_reward)
+                metrics["min_episode_reward"] = min(metrics["min_episode_reward"], episode_reward)
+                
+                # 记录到MLflow
+                if args.actor_mlflow_tracking:
                     try:
                         if mlflow.active_run():
                             mlflow.log_metrics({
-                                "actor_episode_reward": episode_reward,
-                                "actor_episode_steps": episode_steps,
+                                "actor_avg_episode_reward": metrics["avg_episode_reward"],
+                                # "actor_episode_reward": episode_reward,
+                                # "actor_episode_steps": episode_steps,
                                 "actor_max_episode_reward": metrics["max_episode_reward"],
                                 "actor_min_episode_reward": metrics["min_episode_reward"]
                             }, step=metrics["episodes_completed"])
                     except Exception as e:
                         print(f"[ACTOR{rank}] MLflow 记录episode指标失败: {e}")
-                    if rank == 0:
-                        print(f"[ACTOR{rank}] Episode {metrics['episodes_completed']} 完成, 奖励: {episode_reward:.4f}, 步数: {episode_steps}")
+                if rank == 0:
+                    print(f"[ACTOR{rank}] Episode {metrics['episodes_completed']} 完成, 奖励: {episode_reward:.4f}, 步数: {episode_steps}")
 
-                    # 计算本集是否成功：基于可用的 info 字段
-                    # 判定标准：任一步满足 very_close_to_target 为 True，或 distance_to_target < 0.3
+                # 计算本集是否成功：基于可用的 info 字段
+                # 判定标准：任一步满足 very_close_to_target 为 True，或 distance_to_target < 0.3
+                episode_success = False
+                try:
+                    for exp in reversed(episode_buffer):
+                        info_dict = exp.get('info', {}) if isinstance(exp, dict) else {}
+                        if info_dict.get('success', False):
+                            episode_success = True
+                            break
+                except Exception as e:
+                    print(f"[ACTOR{rank}] 计算episode成功标志失败，{e}")
                     episode_success = False
-                    try:
-                        for exp in reversed(episode_buffer):
-                            info_dict = exp.get('info', {}) if isinstance(exp, dict) else {}
-                            if info_dict.get('success', False):
-                                episode_success = True
-                                break
-                    except Exception as e:
-                        print(f"[ACTOR{rank}] 计算episode成功标志失败，{e}")
-                        episode_success = False
-                    recent_episode_success.append(bool(episode_success))
+                recent_episode_success.append(bool(episode_success))
 
-                    # 达到窗口长度后计算成功率，如超过阈值则触发全局停止
-                    if len(recent_episode_success) == early_stop_window:
-                        success_rate = sum(1 for s in recent_episode_success if s) / early_stop_window
+                # 达到窗口长度后计算成功率，如超过阈值则触发全局停止
+                if len(recent_episode_success) == early_stop_window:
+                    success_rate = sum(1 for s in recent_episode_success if s) / early_stop_window
+                    if args.actor_mlflow_tracking:
                         try:
                             if mlflow.active_run():
                                 mlflow.log_metrics({
                                     "actor_recent_success_rate": success_rate
                                 }, step=metrics["episodes_completed"])
+                        except Exception as e:
+                            print(f"[ACTOR{rank}] MLflow 记录成功率指标失败: {e}")
+                    if success_rate >= early_stop_threshold:
+                        print(f"[ACTOR{rank}] 早停触发: 最近{early_stop_window}集成功率 {success_rate*100:.1f}% >= {early_stop_threshold*100:.1f}% ，请求停止训练")
+                        try:
+                            stop_event.set()
                         except Exception:
                             pass
-                        if success_rate >= early_stop_threshold:
-                            print(f"[ACTOR{rank}] 早停触发: 最近{early_stop_window}集成功率 {success_rate*100:.1f}% >= {early_stop_threshold*100:.1f}% ，请求停止训练")
-                            try:
-                                stop_event.set()
-                            except Exception:
-                                pass
-                    
-                    # 处理episode buffer中的经验（可选episode级奖励整形）
-                    if bool(getattr(args, 'enqueue_at_episode_end', True)) and bool(getattr(args, 'enable_episode_shaping', True)):
-                        # 1. 计算episode总奖励
-                        episode_total_reward = episode_reward
-                        # 调整episode总奖励的影响
-                        if episode_success:
-                            episode_reward_factor = 0.01
-                        else:
-                            episode_reward_factor = 0.0
-                        # 2. 计算episode-level距离奖励（基于最后一步与目标的距离）
-                        if 'distance_to_target' in episode_buffer[-1]['info']:
-                            final_distance = episode_buffer[-1]['info']['distance_to_target']
-                            episode_distance_reward = 50.0 / (1.0 + final_distance)
-                        else:
-                            episode_distance_reward = 0.0
-                        # 平均分配到每一步
-                        per_step_episode_reward = episode_distance_reward / len(episode_buffer)
-                        # 3. 修改每一步的奖励并发送到经验队列
-                        for i, exp in enumerate(episode_buffer):
-                            modified_reward = exp['reward'] + episode_total_reward * episode_reward_factor
-                            modified_reward += per_step_episode_reward
-                            if 'distance_to_target' in exp['info']:
-                                step_distance = exp['info']['distance_to_target']
-                                step_distance_reward = 10.0 / (1.0 + step_distance)
-                                modified_reward += step_distance_reward
-                            try:
-                                exp_q.put((exp['obs'], exp['action'], modified_reward, exp['next_obs'], exp['done']), timeout=0.1)
-                            except Full:
-                                pass
-                            except Exception as e:
-                                print(f"[ACTOR{rank}] 写入经验异常: {e}")
-                    elif bool(getattr(args, 'enqueue_at_episode_end', True)) and not bool(getattr(args, 'enable_episode_shaping', True)):
-                        # 回合结束写入，但不进行episode级整形，直接发送原始经验
-                        for i, exp in enumerate(episode_buffer):
-                            try:
-                                exp_q.put((exp['obs'], exp['action'], exp['reward'], exp['next_obs'], exp['done']), timeout=0.1)
-                            except Full:
-                                pass
-                            except Exception as e:
-                                print(f"[ACTOR{rank}] 写入经验异常: {e}")
-                    
-                    # 清空episode buffer
-                    episode_buffer = []
-                    
-                    # 重置环境和计数器
-                    obs, info = env.reset()
-                    episode_reward = 0.0
-                    episode_steps = 0
-                except Exception as e:
-                    print(f"[ACTOR{rank}] reset 异常: {e}")
-                    continue
-    except KeyboardInterrupt:
-        print(f"[ACTOR{rank}] 收到中断信号")
-    except Exception as e:
-        print(f"[ACTOR{rank}] 启动异常: {e}")
-        raise e
-    finally:
-        # 结束MLflow运行
+                
+                # 处理episode buffer中的经验（可选episode级奖励整形）
+                if bool(getattr(args, 'enqueue_at_episode_end', True)) and bool(getattr(args, 'enable_episode_shaping', True)):
+                    # 1. 计算episode总奖励
+                    episode_total_reward = episode_reward
+                    # 调整episode总奖励的影响
+                    if episode_success:
+                        episode_reward_factor = 0.01
+                    else:
+                        episode_reward_factor = 0.0
+                    # 2. 计算episode-level距离奖励（基于最后一步与目标的距离）
+                    if 'distance_to_target' in episode_buffer[-1]['info']:
+                        final_distance = episode_buffer[-1]['info']['distance_to_target']
+                        episode_distance_reward = 50.0 / (1.0 + final_distance)
+                    else:
+                        episode_distance_reward = 0.0
+                    # 平均分配到每一步
+                    per_step_episode_reward = episode_distance_reward / len(episode_buffer)
+                    # 3. 修改每一步的奖励并发送到经验队列
+                    for i, exp in enumerate(episode_buffer):
+                        modified_reward = exp['reward'] + episode_total_reward * episode_reward_factor
+                        modified_reward += per_step_episode_reward
+                        if 'distance_to_target' in exp['info']:
+                            step_distance = exp['info']['distance_to_target']
+                            step_distance_reward = 10.0 / (1.0 + step_distance)
+                            modified_reward += step_distance_reward
+                        try:
+                            exp_q.put((exp['obs'], exp['action'], modified_reward, exp['next_obs'], exp['done']), timeout=0.1)
+                        except Full:
+                            pass
+                        except Exception as e:
+                            print(f"[ACTOR{rank}] 写入经验异常: {e}")
+                elif bool(getattr(args, 'enqueue_at_episode_end', True)) and not bool(getattr(args, 'enable_episode_shaping', True)):
+                    # 回合结束写入，但不进行episode级整形，直接发送原始经验
+                    for i, exp in enumerate(episode_buffer):
+                        try:
+                            exp_q.put((exp['obs'], exp['action'], exp['reward'], exp['next_obs'], exp['done']), timeout=0.1)
+                        except Full:
+                            pass
+                        except Exception as e:
+                            print(f"[ACTOR{rank}] 写入经验异常: {e}")
+                
+                # 清空episode buffer
+                episode_buffer = []
+                
+                # 重置环境和计数器
+                obs, info = env.reset()
+                episode_reward = 0.0
+                episode_steps = 0
+            except Exception as e:
+                print(f"[ACTOR{rank}] reset 异常: {e}")
+                continue
+    if args.actor_mlflow_tracking:
         try:
             if mlflow.active_run():
                 # 记录最终指标
@@ -403,12 +394,11 @@ def _actor_process(rank: int, cargo_type: str, args: argparse.Namespace, obs_q: 
         except Exception as e:
             print(f"[ACTOR{rank}] MLflow 结束运行失败: {e}")
             raise e
-            
-        print(f"[ACTOR{rank}] 进程退出")
-        try:
-            env.close()
-        except Exception:
-            pass
+    print(f"[ACTOR{rank}] 进程退出")
+    try:
+        env.close()
+    except Exception:
+        pass
 
 
 def run_distributed_training(args: argparse.Namespace, model_path: str):
@@ -422,7 +412,7 @@ def run_distributed_training(args: argparse.Namespace, model_path: str):
     
     try:
         mlflow.set_experiment(experiment_name)
-        mlflow.start_run(run_name)
+        mlflow.start_run(run_name=run_name)
         
         # 记录分布式训练参数
         mlflow.log_params({
@@ -499,8 +489,8 @@ def _learner_process(args: argparse.Namespace, model_path: str, obs_queues: list
     print("[LEARNER] 进程启动...")
     
     # 初始化MLflow跟踪
-    experiment_name = args.experiment_name or f"distributed_training_{args.cargo_type}"
-    run_name = f"learner_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    experiment_name = args.experiment_name
+    run_name = f"learner_LinerNoiseDecay_start200000_easy200000_medium200000_hard200000_end1000000_correct_LR{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
     # 设置MLflow实验
     try:
@@ -523,7 +513,36 @@ def _learner_process(args: argparse.Namespace, model_path: str, obs_queues: list
             "target_policy_noise": getattr(args, 'target_noise', 0.2),
             "target_noise_clip": getattr(args, 'noise_clip', 0.5),
             "num_actors": len(obs_queues),
-            "total_steps": getattr(args, 'total_steps', 50000)
+            "total_steps": getattr(args, 'total_steps', 50000),
+            "macro_action_steps": getattr(args, 'macro_action_steps', 1),
+            "action_mode": getattr(args, 'action_mode', 'wheels'),
+            "obs_mode": getattr(args, 'obs_mode', 'local_map'),
+            "device": getattr(args, 'device', 'cuda'),
+            "enqueue_at_episode_end": getattr(args, 'enqueue_at_episode_end', False),
+            "enable_episode_shaping": getattr(args, 'enable_episode_shaping', False),
+            "delta_distance_k": getattr(args, 'delta_distance_k', 30.0),
+            "movement_reward_k": getattr(args, 'movement_reward_k', 0.5),
+            "liner_distance_reward": getattr(args, 'liner_distance_reward', False),
+            "distance_k": getattr(args, 'distance_k', 1.0),
+            "time_k": getattr(args, 'time_k', 0.2),
+            "wall_proximity_penalty_k": getattr(args, 'wall_proximity_penalty_k', 2.0),
+            "angle_reward_k": getattr(args, 'angle_reward_k', 2.0),
+            "angle_change_k": getattr(args, 'angle_change_k', 10.0),
+            "early_spin_penalty_k": getattr(args, 'early_spin_penalty_k', 1.0),
+            "front_clear_k": getattr(args, 'front_clear_k', 1.0),
+            "stop_bonus_k": getattr(args, 'stop_bonus_k', 0),
+            "approach_reward_k": getattr(args, 'approach_reward_k', 0),
+            "slow_down_reward_k": getattr(args, 'slow_down_reward_k', 0),
+            # 动态超参（学习率与噪声）
+            "lr_schedule_type": getattr(args, 'lr_schedule_type', 'linear'),
+            "lr_final": (getattr(args, 'lr_final', None) if getattr(args, 'lr_final', None) is not None else getattr(args, 'learning_rate', 3e-4)),
+            "exploration_noise_type": getattr(args, 'exploration_noise_type', 'linear'),
+            "exploration_noise_init": getattr(args, 'exploration_noise_init', 0.3),
+            "exploration_noise_final": getattr(args, 'exploration_noise_final', 0.05),
+            "target_policy_noise_init": getattr(args, 'target_policy_noise_init', 0.2),
+            "target_policy_noise_final": getattr(args, 'target_policy_noise_final', 0.05),
+            "target_noise_clip_init": getattr(args, 'target_noise_clip_init', 0.5),
+            "target_noise_clip_final": getattr(args, 'target_noise_clip_final', 0.1)
         })
         print(f"[LEARNER] MLflow 跟踪已初始化: {experiment_name}/{run_name}")
     except Exception as e:
@@ -563,8 +582,11 @@ def _learner_process(args: argparse.Namespace, model_path: str, obs_queues: list
 
     fake_env = _FakeEnv(obs_space, act_space)
     print(f"{obs_space}, {act_space}")
-    log_dir = "./logs/"
-
+    # TensorBoard logging root and run name
+    log_root = getattr(args, 'tensorboard_log', '/root/workspace/RL_car2/rosbot_navigation/logs')
+    _tb_arg = getattr(args, 'tb_log_name', None)
+    tb_log_name = _tb_arg if _tb_arg else f"stage1_{getattr(args,'cargo_type','normal')}_{getattr(args,'curriculum_stage','start')}"
+    
     # ===== 课程链式加载：若提供上一课程模型或可自动发现，则优先加载 =====
     model = None
     try:
@@ -573,7 +595,14 @@ def _learner_process(args: argparse.Namespace, model_path: str, obs_queues: list
             print(f"[LEARNER] 从提供的上一课程模型加载: {prev_path}")
             model = TD3.load(prev_path, env=fake_env, device=device)
             try:
-                model.set_logger(sb3_configure(log_dir))
+                model.set_logger(
+                    sb3_configure_logger(
+                        verbose=int(getattr(args, 'verbose', 1)),
+                        tensorboard_log=log_root,
+                        tb_log_name=tb_log_name,
+                        reset_num_timesteps=True,
+                    )
+                )
             except Exception:
                 pass
         else:
@@ -590,7 +619,14 @@ def _learner_process(args: argparse.Namespace, model_path: str, obs_queues: list
                     print(f"[LEARNER] 自动发现上一课程模型: {best}")
                     model = TD3.load(str(best), env=fake_env, device=device)
                     try:
-                        model.set_logger(sb3_configure(log_dir))
+                        model.set_logger(
+                            sb3_configure_logger(
+                                verbose=int(getattr(args, 'verbose', 1)),
+                                tensorboard_log=log_root,
+                                tb_log_name=tb_log_name,
+                                reset_num_timesteps=True,
+                            )
+                        )
                     except Exception:
                         pass
     except Exception as e:
@@ -613,15 +649,35 @@ def _learner_process(args: argparse.Namespace, model_path: str, obs_queues: list
                     policy_delay=getattr(args, 'policy_delay', 2),
                     # target_policy_noise=getattr(args, 'target_noise', 0.2),
                     # target_noise_clip=getattr(args, 'noise_clip', 0.5),
-                    verbose=1,
+                    verbose=int(getattr(args, 'verbose', 1)),
                     device=device,
-                    tensorboard_log=log_dir
+                    tensorboard_log=log_root
         )
-        try:
-            model.set_logger(sb3_configure(log_dir))
-        except Exception:
-            pass
+        # Configure SB3 logger so that manual training (model.train) has a logger
+        tb_root_for_logger = None if (log_root is None or str(log_root).strip()=="") else log_root
+        model.set_logger(
+            sb3_configure_logger(
+                verbose=int(getattr(args, 'verbose', 1)),
+                tensorboard_log=tb_root_for_logger,
+                tb_log_name=tb_log_name,
+                reset_num_timesteps=True,
+            )
+        )
     
+    # Ensure logger is set even when model was loaded (avoid AttributeError: _logger)
+    try:
+        _ = model.logger  # access to verify presence
+    except Exception:
+        tb_root_for_logger = None if (log_root is None or str(log_root).strip()=="") else log_root
+        model.set_logger(
+            sb3_configure_logger(
+                verbose=int(getattr(args, 'verbose', 1)),
+                tensorboard_log=tb_root_for_logger,
+                tb_log_name=tb_log_name,
+                reset_num_timesteps=True,
+            )
+        )
+
     print("[LEARNER] TD3 模型初始化完成")
     # 向主进程发送初始化完成的信号
     init_event.set()
@@ -637,7 +693,65 @@ def _learner_process(args: argparse.Namespace, model_path: str, obs_queues: list
     last_reward_print = 0
     last_mlflow_log = 0  # MLflow日志记录时间点
     add_new_exp = 0
-    
+    # 训练指标缓存（在降频打印/记录时使用）
+    actor_loss_last = None
+    critic_loss_last = None
+    learning_rate_last = None
+    n_updates_last = 0
+    exploration_sigma_last = None
+    target_policy_noise_last = None
+
+    # ===== 动态调度函数（学习率与噪声）=====
+    def _progress(collected_steps: int, total: int) -> float:
+        total = max(1, int(total))
+        p = max(0.0, min(1.0, float(collected_steps) / float(total)))
+        return p
+
+    def _interp(kind: str, start: float, end: float, t: float) -> float:
+        if kind == 'cosine':
+            import math
+            c = (1.0 - math.cos(math.pi * max(0.0, min(1.0, t)))) * 0.5
+            return start + (end - start) * c
+        # default linear
+        return start + (end - start) * max(0.0, min(1.0, t))
+
+    def get_current_lr(collected_steps: int, total: int) -> float:
+        sched = getattr(args, 'lr_schedule_type', 'linear')
+        lr_start = float(getattr(args, 'learning_rate', 3e-4))
+        _lr_end = getattr(args, 'lr_final', None)
+        lr_end = lr_start if (_lr_end is None) else float(_lr_end)
+        t = _progress(collected_steps, total)
+        val = _interp(sched, lr_start, lr_end, t)
+        return max(1e-8, float(val))
+
+    def get_exploration_sigma(collected_steps: int, total: int) -> float:
+        sched = getattr(args, 'exploration_noise_type', 'linear')
+        n0 = float(getattr(args, 'exploration_noise_init', 0.3))
+        n1 = float(getattr(args, 'exploration_noise_final', 0.05))
+        t = _progress(collected_steps, total)
+        return max(0.0, float(_interp(sched, n0, n1, t)))
+
+    def get_target_policy_noise(collected_steps: int, total: int) -> float:
+        sched = getattr(args, 'exploration_noise_type', 'linear')
+        n0 = float(getattr(args, 'target_policy_noise_init', 0.2))
+        n1 = float(getattr(args, 'target_policy_noise_final', 0.05))
+        t = _progress(collected_steps, total)
+        return max(0.0, float(_interp(sched, n0, n1, t)))
+
+    def get_target_noise_clip(collected_steps: int, total: int) -> float:
+        sched = getattr(args, 'exploration_noise_type', 'linear')
+        c0 = float(getattr(args, 'target_noise_clip_init', 0.5))
+        c1 = float(getattr(args, 'target_noise_clip_final', 0.1))
+        t = _progress(collected_steps, total)
+        return max(0.0, float(_interp(sched, c0, c1, t)))
+
+    def _set_optimizer_lr(opt, lr: float):
+        try:
+            for pg in opt.param_groups:
+                pg['lr'] = float(lr)
+        except Exception:
+            pass
+
     print(f"[LEARNER] 开始主循环，目标步数: {total_steps}")
 
     try:
@@ -662,6 +776,18 @@ def _learner_process(args: argparse.Namespace, model_path: str, obs_queues: list
                         # 通过 policy.predict 获得动作
                         with torch.no_grad():
                             action, _ = model.predict(obs_proc, deterministic=True)
+                        # 动态探索噪声（按步数衰减）
+                        try:
+                            sigma = get_exploration_sigma(collected, total_steps)
+                            exploration_sigma_last = float(sigma)
+                            if sigma > 0.0:
+                                noise = np.random.normal(loc=0.0, scale=sigma, size=np.shape(action)).astype(np.float32)
+                                action = np.asarray(action, dtype=np.float32) + noise
+                            # 动作裁剪到动作空间范围
+                            if hasattr(act_space, 'low') and hasattr(act_space, 'high'):
+                                action = np.clip(action, act_space.low, act_space.high)
+                        except Exception:
+                            action = np.asarray(action, dtype=np.float32)
                         aq.put(action, timeout=1.0)
                         actions_served += 1
                     except Exception as e:
@@ -702,43 +828,126 @@ def _learner_process(args: argparse.Namespace, model_path: str, obs_queues: list
             if collected >= getattr(args, 'learning_starts'):
                 #print(f"[LEARNER] 训练，收集样本: {collected}, 缓冲区大小: {model.replay_buffer.size()}")
                 add_new_exp = 0
+                # 动态学习率与目标策略噪声
+                try:
+                    current_lr = get_current_lr(collected, total_steps)
+                    learning_rate_last = float(current_lr)
+                    # 更新优化器学习率（兼容不同SB3结构）
+                    try:
+                        if hasattr(model, 'policy') and hasattr(model.policy, 'actor') and hasattr(model.policy.actor, 'optimizer'):
+                            _set_optimizer_lr(model.policy.actor.optimizer, current_lr)
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(model, 'policy') and hasattr(model.policy, 'critic') and hasattr(model.policy.critic, 'optimizer'):
+                            _set_optimizer_lr(model.policy.critic.optimizer, current_lr)
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(model, 'actor') and hasattr(model.actor, 'optimizer'):
+                            _set_optimizer_lr(model.actor.optimizer, current_lr)
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(model, 'critic') and hasattr(model.critic, 'optimizer'):
+                            _set_optimizer_lr(model.critic.optimizer, current_lr)
+                    except Exception:
+                        pass
+                    # 更新 TD3 目标策略噪声（用于目标值平滑）
+                    tp_noise = get_target_policy_noise(collected, total_steps)
+                    tp_clip = get_target_noise_clip(collected, total_steps)
+                    target_policy_noise_last = float(tp_noise)
+                    if hasattr(model, 'target_policy_noise'):
+                        model.target_policy_noise = float(tp_noise)
+                    if hasattr(model, 'target_noise_clip'):
+                        model.target_noise_clip = float(tp_clip)
+                except Exception:
+                    pass
                 model.train(gradient_steps=getattr(args, 'gradient_steps', 1), batch_size=model.batch_size)
+                # 抓取本次训练产生的关键指标，缓存起来，按 log_interval 再统一输出/记录
+                try:
+                    nv = getattr(model, 'logger').name_to_value if hasattr(model, 'logger') else {}
+                    if isinstance(nv, dict):
+                        if "train/actor_loss" in nv:
+                            actor_loss_last = float(nv["train/actor_loss"])  # type: ignore[arg-type]
+                        if "train/critic_loss" in nv:
+                            critic_loss_last = float(nv["train/critic_loss"])  # type: ignore[arg-type]
+                        if "train/learning_rate" in nv:
+                            learning_rate_last = float(nv["train/learning_rate"])  # type: ignore[arg-type]
+                        if "train/n_updates" in nv:
+                            try:
+                                n_updates_last = int(nv["train/n_updates"])  # type: ignore[arg-type]
+                            except Exception:
+                                # 某些格式可能是 float
+                                n_updates_last = int(float(nv["train/n_updates"]))  # type: ignore[arg-type]
+                except Exception:
+                    pass
 
             # 降频打印
-            if collected - last_print >= getattr(args, 'log_interval', 1000):
+            if collected - last_print >= getattr(args, 'log_interval', 1000) and collected > 1000:
                 last_print = collected
                 # 计算最近100个奖励的平均值
                 recent_rewards = reward_history[-1000:] if len(reward_history) > 1000 else reward_history
                 avg_reward = sum(recent_rewards) / len(recent_rewards) if recent_rewards else 0
-                print(f"[LEARNER] 收集样本: {collected}, 缓冲区大小: {model.replay_buffer.size()}, 最近1000步平均奖励: {avg_reward:.4f}")
-                
+                # 打印核心训练与采样信息
+                al = f"{actor_loss_last:.6f}" if actor_loss_last is not None else "NA"
+                cl = f"{critic_loss_last:.6f}" if critic_loss_last is not None else "NA"
+                lr = f"{learning_rate_last:.2e}" if learning_rate_last is not None else "NA"
+                nu = f"{n_updates_last}" if n_updates_last is not None else "NA"
+                print(
+                    f"[LEARNER] 收集样本: {collected}, 缓冲区大小: {model.replay_buffer.size()}, "
+                    f"最近1000步平均奖励: {avg_reward:.4f}, actor_loss: {al}, critic_loss: {cl}, lr: {lr}, n_updates: {nu}"
+                )
+
                 # 降频记录到MLflow (每log_interval步)
                 try:
-                    mlflow.log_metrics({
-                        "training_steps": collected,
-                        "buffer_size": model.replay_buffer.size(),
-                        "recent_100_avg_reward": avg_reward,
-                        "actions_served": actions_served
-                    }, step=collected)
+                    metrics = {
+                        "recent_1000_avg_reward": avg_reward,
+                        "actions_served": actions_served,
+                    }
+                    if actor_loss_last is not None:
+                        metrics["actor_loss"] = float(actor_loss_last)
+                    if critic_loss_last is not None:
+                        metrics["critic_loss"] = float(critic_loss_last)
+                    if learning_rate_last is not None:
+                        metrics["learning_rate"] = float(learning_rate_last)
+                    if exploration_sigma_last is not None:
+                        metrics["exploration_sigma"] = float(exploration_sigma_last)
+                    if target_policy_noise_last is not None:
+                        metrics["target_policy_noise"] = float(target_policy_noise_last)
+                    if n_updates_last is not None:
+                        metrics["n_updates"] = int(n_updates_last)
+                    mlflow.log_metrics(metrics, step=collected)
                 except Exception as e:
                     print(f"[LEARNER] MLflow 记录指标失败: {e}")
+
+                # # 将关键指标也同步到 SB3 Logger，并在该频率下 flush 到各输出（如 stdout / TB）
+                # try:
+                #     if actor_loss_last is not None:
+                #         model.logger.record("train/actor_loss", float(actor_loss_last))
+                #     if critic_loss_last is not None:
+                #         model.logger.record("train/critic_loss", float(critic_loss_last))
+                #     if learning_rate_last is not None:
+                #         model.logger.record("train/learning_rate", float(learning_rate_last))
+                #     if n_updates_last is not None:
+                #         model.logger.record("train/n_updates", int(n_updates_last))
+                #     model.logger.record("train/collected_steps", float(collected), exclude=("stdout",))
+                #     model.logger.dump(step=int(collected))
+                # except Exception:
+                #     pass
                 
-            # 奖励统计打印
-            if collected - last_reward_print >= 1000:  # 每1000步打印一次奖励统计
-                last_reward_print = collected
                 if reward_history:
                     avg_reward = sum(reward_history) / len(reward_history)
                     max_reward = max(reward_history)
                     min_reward = min(reward_history)
-                    recent_avg = sum(reward_history[-100:]) / min(100, len(reward_history))
+                    recent_avg = sum(reward_history[-1000:]) / min(1000, len(reward_history))
                     
-                    print(f"\n[LEARNER] === 奖励统计 (步数: {collected}) ===")
-                    print(f"平均奖励: {avg_reward:.4f}")
-                    print(f"最大奖励: {max_reward:.4f}")
-                    print(f"最小奖励: {min_reward:.4f}")
-                    print(f"最近100步平均: {recent_avg:.4f}")
-                    print(f"已完成Episodes: {episode_count}")
-                    print(f"==============================\n")
+                    # print(f"\n[LEARNER] === 奖励统计 (步数: {collected}) ===")
+                    # print(f"平均奖励: {avg_reward:.4f}")
+                    # print(f"最大奖励: {max_reward:.4f}")
+                    # print(f"最小奖励: {min_reward:.4f}")
+                    # print(f"最近1000步平均: {recent_avg:.4f}")
+                    # print(f"==============================\n")
                     
                     # 记录到MLflow
                     try:
@@ -746,9 +955,7 @@ def _learner_process(args: argparse.Namespace, model_path: str, obs_queues: list
                             "average_reward": avg_reward,
                             "max_reward": max_reward,
                             "min_reward": min_reward,
-                            "recent_100_avg_reward": recent_avg,
-                            "episode_count": episode_count,
-                            "buffer_size": model.replay_buffer.size()
+                            "recent_1000_avg_reward": recent_avg,
                         }, step=collected)
                     except Exception as e:
                         print(f"[LEARNER] MLflow 记录指标失败: {e}")
@@ -772,9 +979,7 @@ def _learner_process(args: argparse.Namespace, model_path: str, obs_queues: list
                 if reward_history:
                     mlflow.log_metrics({
                         "final_avg_reward": sum(reward_history) / len(reward_history),
-                        "final_recent_avg": sum(reward_history[-100:]) / min(100, len(reward_history)),
                         "total_steps": collected,
-                        "total_episodes": episode_count
                     })
                 # 结束MLflow运行
                 mlflow.end_run()
@@ -788,31 +993,27 @@ def main():
     now = datetime.now().replace(microsecond=0)
     """主函数"""
     parser = argparse.ArgumentParser(description='ROSbot第一阶段训练脚本')
-    parser.add_argument('--cargo_type', type=str, default='normal', 
-                       choices=['normal', 'fragile', 'dangerous'],
-                       help='货物类型')
-    parser.add_argument('--total_steps', type=int, default=500000,
-                       help='总训练步数')
-    parser.add_argument('--model_path', type=str, default=None,
-                       help='模型保存路径')
-    parser.add_argument('--device', type=str, default='cuda', 
-                       help='计算设备 (e.g., "cpu", "cuda", "auto")')
+
+    #调试参数    
     parser.add_argument('--debug', type=bool, default=False, help='调试模式')
-    # 观测模式：local_map 使用局部栅格地图（MultiInputPolicy）；lidar 使用20维LiDAR向量（MlpPolicy）
-    parser.add_argument('--obs_mode', type=str, default='local_map', choices=['local_map','lidar'], help='观测模式：local_map=局部地图，lidar=20维激光向量')
-    # 经验写入时机：True=回合结束再写入（可配合episode整形）；False=逐步立即写入
     parser.add_argument('--show_map', type=bool, default=False, help='是否显示地图')
     parser.add_argument('--show_ui', type=bool, default=True, help='是否显示UI')
-    # 日志与异步控制now=datetime.now()
+
+    # 日志
     parser.add_argument('--log_interval', type=int, default=1000, help='控制台打印间隔步数')
-    parser.add_argument('--mlflow_log_interval', type=int, default=1000, help='MLflow 记录间隔步数')
-    parser.add_argument('--async_vec', type=bool, default=True, help='是否使用异步向量环境以减少最慢实例拖慢')
-    parser.add_argument('--prelaunch_webots', type=bool, default=True, help='是否在主进程串行预启动 Webots 实例以避免并发启动卡顿')
-    # 分布式 Actor-Learner
+    parser.add_argument('--mlflow_log_interval', type=int, default=200, help='MLflow 记录间隔步数')
+    parser.add_argument('--experiment_name', type=str, default='test1', help='MLflow 实验名称')
+    parser.add_argument('--verbose', type=int, default=1, choices=[0, 1, 2], help='SB3 日志详细程度 (0=无,1=信息,2=调试)')
+    parser.add_argument('--tensorboard_log', type=str, default='/root/workspace/RL_car2/rosbot_navigation/logs', help='TensorBoard 日志根目录')
+    parser.add_argument('--tb_log_name', type=str, default=None, help='TensorBoard 运行名称 (默认根据阶段和货物自动生成)')
+    parser.add_argument('--actor_mlflow_tracking', type=bool, default=False, help='是否启用Actor的MLflow跟踪')
+
+    # 分布式训练参数
     parser.add_argument('--distributed', type=bool, default=True, help='启用多Actor+单Learner分布式训练')
     parser.add_argument('--num_actors', type=int, default=8, help='Actor 数量')
-    # 并行/实例与Webots相关参数
     parser.add_argument('--num_envs', type=int, default=8, help='并行环境数量（>1启用多进程并行）')
+
+    # Webots参数
     # world参数将被每个actor覆盖为 env1/env2 对半分配，这里保留但不使用
     parser.add_argument('--world', type=str, default='/root/workspace/RL_car2/warehouse/worlds/warehouse5_env1.wbt', help='默认 Webots world 文件路径（分布式模式下按actor覆盖）')
     parser.add_argument('--headless', type=bool,default=True, help='以无渲染/批处理模式启动 Webots')
@@ -822,44 +1023,79 @@ def main():
     parser.add_argument('--minimize', type=bool,default=True, help='最小化模式')
     parser.add_argument('--control_period_ms', type=int, default=200, help='控制周期(ms)，用于减少控制往返')
     parser.add_argument('--seed', type=int, default=0, help='随机种子')
+
     # 宏动作步数：1 表示一次控制，5 表示 5×2 宏动作
     parser.add_argument('--macro_action_steps', type=int, default=1, help='每步执行的子动作数量（1 表示一次控制，>1 表示宏动作，例如 5 表示5×2）')
     # 动作模式：wheels 表示左右轮百分比；twist 表示线速度/角速度百分比
     parser.add_argument('--action_mode', type=str, default='wheels', choices=['wheels','twist'], help='动作模式：wheels=左右轮百分比，twist=线速度/角速度百分比')
-    # 是否启用 episode 级别奖励整形（在每集结束后对整集经验的奖励进行再分配）
-    parser.add_argument('--enqueue_at_episode_end', type=bool, default=True, help='是否在回合结束后再写入经验（否则逐步写入）')
-    parser.add_argument('--enable_episode_shaping', type=bool, default=True, help='是否启用 episode 级别奖励整形')
+    # 观测模式：local_map 使用局部栅格地图（MultiInputPolicy）；lidar 使用20维LiDAR向量（MlpPolicy）
+    parser.add_argument('--obs_mode', type=str, default='lidar', choices=['local_map','lidar'], help='观测模式：local_map=局部地图，lidar=20维激光向量')
+    # 动作平滑（限幅）开关
+    parser.add_argument('--enable_speed_smoothing', type=bool, default=False, help='是否启用速度平滑（单步限幅）')
+
     # 课程学习阶段
-    parser.add_argument('--curriculum_stage', type=str, default='medium', choices=['start','easy','medium','hard','end','all'], help='课程学习阶段')
-    parser.add_argument('--prev_model_path', type=str, default='/root/workspace/RL_car2/rosbot_navigation/results/test4/test1_easy_2025-09-24 19:28:12/models/td3_normal_stage1_easy_500000_2025-09-24 19:28:12.zip', help='上一课程模型路径（若不提供则自动搜索）')
+    parser.add_argument('--curriculum_stage', type=str, default='start', choices=['start','easy','medium','hard','end','all'], help='课程学习阶段')
+    parser.add_argument('--prev_model_path', type=str, default='', help='上一课程模型路径（若不提供则自动搜索）')
+    parser.add_argument('--cargo_type', type=str, default='normal', choices=['normal', 'fragile', 'dangerous'],help='货物类型')
     
     # TD3算法相关参数
+    parser.add_argument('--total_steps', type=int, default=50000,help='总训练步数')
+    parser.add_argument('--device', type=str, default='cuda', help='计算设备 (e.g., "cpu", "cuda", "auto")')
+    parser.add_argument('--model_path', type=str, default=None,help='模型保存路径')
+
     parser.add_argument('--learning_rate', type=float, default=3e-4, help='学习率')
     parser.add_argument('--buffer_size', type=int, default=50000, help='经验回放缓冲区大小')
-    parser.add_argument('--learning_starts', type=int, default=5000, help='预热步数，开始学习前收集的样本数量')
+    parser.add_argument('--learning_starts', type=int, default=2000, help='预热步数，开始学习前收集的样本数量')
     parser.add_argument('--batch_size', type=int, default=256, help='批处理大小')
     parser.add_argument('--gamma', type=float, default=0.99, help='折扣因子')
     parser.add_argument('--tau', type=float, default=0.005, help='目标网络软更新系数')
     parser.add_argument('--gradient_steps', type=int, default=1, help='每步梯度更新次数')
-    # 早停相关：最近N集成功率超过阈值则停止
-    parser.add_argument('--early_stop_window', type=int, default=50, help='早停窗口大小（最近N集）')
-    parser.add_argument('--early_stop_success', type=float, default=0.80, help='早停成功率阈值（0-1）')
     parser.add_argument('--train_freq', type=int, default=1, help='训练频率')
     parser.add_argument('--policy_delay', type=int, default=2, help='策略延迟更新步数')
     parser.add_argument('--step_per_train', type=int, default=4, help='每次训练次相隔步数')
     # parser.add_argument('--target_noise', type=float, default=0.05, help='目标策略噪声')
     # parser.add_argument('--noise_clip', type=float, default=0.2, help='噪声裁剪范围')
     
+    # 动态学习率与噪声调度
+    parser.add_argument('--lr_schedule_type', type=str, default='linear', choices=['linear', 'cosine'], help='学习率调度策略')
+    parser.add_argument('--lr_final', type=float, default=1e-5, help='最终学习率（为空则等于初始学习率）')
+    parser.add_argument('--exploration_noise_type', type=str, default='linear', choices=['linear', 'cosine'], help='动作探索噪声调度策略')
+    parser.add_argument('--exploration_noise_init', type=float, default=0.05, help='初始动作探索噪声 sigma')
+    parser.add_argument('--exploration_noise_final', type=float, default=0.01, help='最终动作探索噪声 sigma')
+    parser.add_argument('--target_policy_noise_init', type=float, default=0.05, help='TD3 目标策略噪声初始值')
+    parser.add_argument('--target_policy_noise_final', type=float, default=0.01, help='TD3 目标策略噪声最终值')
+    parser.add_argument('--target_noise_clip_init', type=float, default=0.2, help='TD3 目标噪声裁剪初始值')
+    parser.add_argument('--target_noise_clip_final', type=float, default=0.05, help='TD3 目标噪声裁剪最终值')
+        
+    # 早停相关：最近N集成功率超过阈值则停止
+    parser.add_argument('--early_stop_window', type=int, default=100, help='早停窗口大小（最近N集）')
+    parser.add_argument('--early_stop_success', type=float, default=0.8, help='早停成功率阈值（0-1）')
 
-    # 添加 cargo_type 参数
-    parser.add_argument('--delta_distance_k', type=float, default=8.0, help='距离变化奖励系数')
-    parser.add_argument('--distance_k', type=float, default=1.0, help='基础距离奖励系数')
-    parser.add_argument('--time_k', type=float, default=3.0, help='时间惩罚系数')   
-    parser.add_argument('--stop_bonus_k', type=float, default=0.5, help='停车奖励系数')   
-    parser.add_argument('--approach_reward_k', type=float, default=100.0, help='接近奖励系数')    
-    parser.add_argument('--movement_reward_k', type=float, default=1.0, help='移动奖励系数')  
-    parser.add_argument('--slow_down_reward_k', type=float, default=0.5, help='接近目标减速奖励系数')
-    parser.add_argument('--liner_distance_reward', type=bool, default=False, help='是否使用线性距离奖励（否则使用二次型）')
+    # 经验写入时机：True=回合结束再写入（可配合episode整形）；False=逐步立即写入
+    parser.add_argument('--enqueue_at_episode_end', type=bool, default=False, help='是否在回合结束后再写入经验（否则逐步写入）')
+    # 是否启用 episode 级别奖励整形（在每集结束后对整集经验的奖励进行再分配）
+    parser.add_argument('--enable_episode_shaping', type=bool, default=False, help='是否启用 episode 级别奖励整形')
+
+    # 奖励系数参数
+    parser.add_argument('--delta_distance_k', type=float, default=30.0, help='距离变化奖励系数，以单步最大变化距离0.2计，基础最大值约为0.2，线性')
+    parser.add_argument('--movement_reward_k', type=float, default=0.5, help='移动奖励系数，基础最大值为10，线性')
+
+    parser.add_argument('--liner_distance_reward', type=int, default=1,choices=[0, 1, 2], help='0:线性 1：负二次型 2：正二次型')
+    parser.add_argument('--distance_k', type=float, default=0.7, help='基础距离奖励系数，基础最大值为50')
+
+    parser.add_argument('--time_k', type=float, default=0.3, help='时间惩罚系数，线性')   
+    parser.add_argument('--wall_proximity_penalty_k', type=float, default=0.5, help='墙壁接近惩罚系数，每条线最大0.15，一共十线，基础最大值3，线性')
+
+    parser.add_argument('--angle_reward_k', type=float, default=2.5, help='角度奖励系数，基础最大值为10，二次型')
+    parser.add_argument('--angle_change_k', type=float, default=10.0, help='角度变化奖励,以单步最大角度变化1计，基础最大值1，线性')
+    parser.add_argument('--early_spin_penalty_k', type=float, default=1.0, help='早期原地打转惩罚系数，负二次型')
+    parser.add_argument('--front_clear_k', type=float, default=1.0, help='前方有路奖励系数，基础最大值约为7，七条线求和，线性')
+    
+    
+    # 停用奖励
+    parser.add_argument('--stop_bonus_k', type=float, default=0, help='停车奖励系数，基础最大值为10')   
+    parser.add_argument('--approach_reward_k', type=float, default=0, help='接近奖励系数，基础最大值为10')  
+    parser.add_argument('--slow_down_reward_k', type=float, default=0, help='接近目标减速奖励系数，基础最大值为10')
     args = parser.parse_args()
     
     
@@ -867,9 +1103,9 @@ def main():
     if args.debug:
         print("启用调试模式")
         torch.autograd.set_detect_anomaly(True)
-    name=f"test1_{args.curriculum_stage}_{now}"
+    name=f"{args.curriculum_stage}_{now}"
     # 创建模型保存目录
-    results_dir = Path(f"./results/test4/{name}")
+    results_dir = Path(f"./results/test11/{name}")
     results_dir.mkdir(parents=True, exist_ok=True)
     
     models_dir = Path(f"{results_dir}/models")
@@ -881,17 +1117,17 @@ def main():
         config_dict = vars(args)
         # 加入启动时间和备注信息
         config_dict['start_time'] = now.strftime("%Y-%m-%d %H:%M:%S")
-        config_dict['remark'] = "测试"
+        config_dict['remark'] = "新增一阶段，平滑过程9/28"
         yaml.dump(config_dict, f)
     
-    args.experiment_name = f"{now}_{args.cargo_type}_{args.total_steps}_{config_dict['remark']}"
+    args.experiment_name = f"{config_dict['remark']}"
     
     
     # 模型文件路径
     
     # 将课程阶段加入模型文件名，便于课程链式加载
     if args.model_path is None:
-        model_path = str(models_dir / f"td3_{args.cargo_type}_stage1_{args.curriculum_stage}_{args.total_steps}_{now}.zip")
+        model_path = str(models_dir / f"td3_{args.curriculum_stage}_{args.total_steps}.zip")
     else:
         model_path = args.model_path
     

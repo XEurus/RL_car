@@ -54,14 +54,14 @@ class ROSbotNavigationEnv(gym.Env):
         # 观测空间定义：根据 obs_mode 决定
         if obs_mode == 'lidar':
             # 仅使用20维 LiDAR 精选向量（不包含地图）
-            base_low = np.zeros(20, dtype=np.float32)
-            base_high = np.ones(20, dtype=np.float32) * 10.0  # 距离上限按10m
+            base_low = np.zeros(10, dtype=np.float32)
+            base_high = np.ones(10, dtype=np.float32) * 10.0  # 距离上限按10m
             parts = [spaces.Box(low=base_low, high=base_high, dtype=np.float32)]
             # 可选：导航信息
             if include_navigation_info:
                 if nav_info_mode == 'minimal':
                     nav_low = np.array([0.0, -pi], dtype=np.float32)
-                    nav_high = np.array([50.0, pi], dtype=np.float32)
+                    nav_high = np.array([20.0, pi], dtype=np.float32)
                 else:
                     nav_low = np.array([
                         -20.0, -20.0, -2.0,
@@ -130,7 +130,7 @@ class ROSbotNavigationEnv(gym.Env):
                 if nav_info_mode == 'minimal':
                     obs_dict['navigation_info'] = spaces.Box(
                         low=np.array([0.0, -pi], dtype=np.float32),
-                        high=np.array([50.0, pi], dtype=np.float32),
+                        high=np.array([20.0, pi], dtype=np.float32),
                         dtype=np.float32
                     )
                 else:
@@ -231,6 +231,8 @@ class ROSbotNavigationEnv(gym.Env):
             obs_mode=str(obs_mode)
         )
         self.obs_mode = str(obs_mode)
+        # 速度平滑（单步限幅）开关，默认开启，可由上层通过 kwargs 传入
+        self.enable_speed_smoothing = bool(kwargs.get('enable_speed_smoothing', True))
         
         # 动作空间 - 根据宏动作步数配置
         if self.action_mode == 'twist':
@@ -589,32 +591,30 @@ class ROSbotNavigationEnv(gym.Env):
         steps = int(self.macro_action_steps)
         if steps <= 1:
             # 单步控制
-            try:
-                current_action = np.asarray(action, dtype=np.float32).reshape(2,)
-                if self.action_mode == 'twist':
-                    self._debug(f"action (twist): v%={float(current_action[0]):.4f}, w%={float(current_action[1]):.4f}")
-                else:
-                    self._debug(f"action (wheels): L%={float(current_action[0]):.4f}, R%={float(current_action[1]):.4f}")
-                self._execute_action(current_action)
-                self.reward_functions.update_action_history(current_action)
-                self.reward_functions.update_current_rotation(float(getattr(self, '_last_cmd_angular_vel', 0.0)))
-                self.episode_steps = int(self.episode_steps) + 1
-                steps_per_control = max(1, int(self.control_period_ms / self.timestep))
-                for _ in range(steps_per_control):
-                    self.supervisor.step(self.timestep)
-                observation, lidar_data = self._get_observation()
-                action_reward = self._calculate_reward(current_action, observation)
-                total_reward += action_reward
-                terminated = self._check_termination()
-                truncated = self._check_truncation()
-                try:
-                    d, _ = self._calculate_distance_to_target()
-                    self._debug(f"reward={action_reward:+.4f}, dist_to_target={d:.3f}, terminated={terminated}, truncated={truncated}")
-                except Exception:
-                    self._debug(f"reward={action_reward:+.4f}, terminated={terminated}, truncated={truncated}")
-            except Exception as e:
-                print(f"控制step 异常: {e}")
-                raise e
+
+            current_action = np.asarray(action, dtype=np.float32).reshape(2,)
+
+            if self.action_mode == 'twist':
+                self._debug(f"action (twist): v%={float(current_action[0]):.4f}, w%={float(current_action[1]):.4f}")
+            else:
+                self._debug(f"action (wheels): L%={float(current_action[0]):.4f}, R%={float(current_action[1]):.4f}")
+            self._execute_action(current_action)
+            self.reward_functions.update_action_history(current_action)
+            self.reward_functions.update_current_rotation(float(getattr(self, '_last_cmd_angular_vel', 0.0)))
+            self.episode_steps = int(self.episode_steps) + 1
+            steps_per_control = max(1, int(self.control_period_ms / self.timestep))
+            for _ in range(steps_per_control):
+                self.supervisor.step(self.timestep)
+
+            observation, lidar_data = self._get_observation()
+            action_reward = self._calculate_reward(current_action, observation)
+            total_reward += action_reward
+            terminated = self._check_termination()
+            truncated = self._check_truncation()
+
+            d, _ = self._calculate_distance_to_target()
+            self._debug(f"reward={action_reward:+.4f}, dist_to_target={d:.3f}, terminated={terminated}, truncated={truncated}")
+            
         else:
             # 宏动作：按子步顺序执行
             actions = np.asarray(action, dtype=np.float32).reshape(steps, 2)
@@ -790,7 +790,7 @@ class ROSbotNavigationEnv(gym.Env):
             dy = float(target_pos[1] - current_pos[1])
             target_yaw = math.atan2(dy, dx)
             # 添加5%扰动（正负方向均可）
-            perturb_percent = random.uniform(0, 0.03)
+            perturb_percent = random.uniform(0, 0.05)
             #perturb_percent = 0 
             perturb_direction = random.choice([-1, 1])
             yaw_perturb = perturb_direction * perturb_percent * math.pi  # 最大扰动为±18°~±36°
@@ -815,7 +815,7 @@ class ROSbotNavigationEnv(gym.Env):
             dy = float(target_pos[1] - current_pos[1])
             target_yaw = math.atan2(dy, dx)
             # 添加5%扰动（正负方向均可）
-            perturb_percent = random.uniform(0, 0.15)
+            perturb_percent = random.uniform(0.05, 0.2)
             #perturb_percent = 0 
             perturb_direction = random.choice([-1, 1])
             yaw_perturb = perturb_direction * perturb_percent * math.pi  # 最大扰动为±18°~±36°
@@ -929,6 +929,7 @@ class ROSbotNavigationEnv(gym.Env):
         try:
             action = np.asarray(action, dtype=np.float32).reshape(-1)
         except Exception:
+            print(f"动作转换异常: {action}")
             action = np.array([0.0, 0.0], dtype=np.float32)
         if action.size < 2:
             action = np.pad(action, (0, max(0, 2 - action.size)), constant_values=0.0)
@@ -1000,20 +1001,24 @@ class ROSbotNavigationEnv(gym.Env):
             left_speed = float(np.clip(cmd_left_speed, 0.0, max_motor_speed))
             right_speed = float(np.clip(cmd_right_speed, 0.0, max_motor_speed))
 
-        # 平滑限速：限制单步变化，避免瞬时大扭矩引发不稳定
-        max_motor_speed = getattr(self, 'max_motor_speed', 26.0)
-        # 每步允许的最大变化（与设备能力成比例）
-        max_delta = max_motor_speed * 0.6  # 例如 60%/step
-        prev_left = float(getattr(self, '_prev_left_speed', 0.0))
-        prev_right = float(getattr(self, '_prev_right_speed', 0.0))
-        # 限制变化范围；twist 模式允许负向
-        if getattr(self, 'action_mode', 'wheels') == 'twist':
-            left_speed = float(np.clip(left_speed, prev_left - max_delta, prev_left + max_delta))
-            right_speed = float(np.clip(right_speed, prev_right - max_delta, prev_right + max_delta))
+        # 平滑限速：限制单步变化，避免瞬时大扭矩引发不稳定（可选）
+        if bool(getattr(self, 'enable_speed_smoothing', True)):
+            max_motor_speed = getattr(self, 'max_motor_speed', 26.0)
+            # 每步允许的最大变化（与设备能力成比例）
+            max_delta = max_motor_speed * 0.6  # 例如 60%/step
+            prev_left = float(getattr(self, '_prev_left_speed', 0.0))
+            prev_right = float(getattr(self, '_prev_right_speed', 0.0))
+            # 限制变化范围；twist 模式允许负向
+            if getattr(self, 'action_mode', 'wheels') == 'twist':
+                left_speed = float(np.clip(left_speed, prev_left - max_delta, prev_left + max_delta))
+                right_speed = float(np.clip(right_speed, prev_right - max_delta, prev_right + max_delta))
+            else:
+                left_speed = float(np.clip(left_speed, max(0.0, prev_left - max_delta), prev_left + max_delta))
+                right_speed = float(np.clip(right_speed, max(0.0, prev_right - max_delta), prev_right + max_delta))
+            self._debug(f"cmd_wheels_post_smooth: L={left_speed:.4f} (prev {prev_left:.4f}), R={right_speed:.4f} (prev {prev_right:.4f}), max_delta={max_delta:.3f}")
         else:
-            left_speed = float(np.clip(left_speed, max(0.0, prev_left - max_delta), prev_left + max_delta))
-            right_speed = float(np.clip(right_speed, max(0.0, prev_right - max_delta), prev_right + max_delta))
-        self._debug(f"cmd_wheels_post_smooth: L={left_speed:.4f} (prev {prev_left:.4f}), R={right_speed:.4f} (prev {prev_right:.4f}), max_delta={max_delta:.3f}")
+            # 未启用平滑时，仅打印一次性调试信息（保持接口一致）
+            self._debug("speed smoothing disabled: using raw wheel speeds")
         
         # 设置四个电机速度 - 左侧两个轮子相同速度，右侧两个轮子相同速度
         if self.fl_motor and self.fr_motor and self.rl_motor and self.rr_motor:
@@ -1076,14 +1081,16 @@ class ROSbotNavigationEnv(gym.Env):
         if getattr(self, 'obs_mode', 'local_map') == 'lidar':
             # 构造20维LiDAR子集：从[8,150]与[250,400]各取10个等间距索引
             n = len(lidar_data)
-            idx_band1 = np.clip(np.linspace(8, 150, num=10, dtype=int), 0, n-1)
-            idx_band2 = np.clip(np.linspace(250, 400, num=10, dtype=int), 0, n-1)
+            idx_band1 = np.clip(np.linspace(8, 80, num=5, dtype=int), 0, n-1)
+            idx_band2 = np.clip(np.linspace(320, 400, num=5, dtype=int), 0, n-1)
             idx = np.unique(np.concatenate([idx_band1, idx_band2]))
             # 若去重后不足20，重复采样补齐
-            if idx.size < 20:
-                extra = np.tile(idx, int(np.ceil(20/idx.size)))[:20]
+            if idx.size < 10:
+                extra = np.tile(idx, int(np.ceil(10/idx.size)))[:10]
                 idx = extra
-            lidar_vec = np.asarray([lidar_data[i] for i in idx[:20]], dtype=np.float32)
+            lidar_vec = np.asarray([lidar_data[i] for i in idx[:10]], dtype=np.float32)
+            lidar_vec = np.clip(lidar_vec, 0.1, 10.0)
+            lidar_vec = np.nan_to_num(lidar_vec, nan=0.1)
             parts = [lidar_vec]
             if getattr(self, 'include_navigation_info', True):
                 if getattr(self, 'nav_info_mode', 'minimal') == 'minimal':
@@ -1155,43 +1162,6 @@ class ROSbotNavigationEnv(gym.Env):
         ])
 
         return amcl_state_replacement
-
-
-    def _get_amcl_state(self):
-        """获取AMCL定位状态 (12维)"""
-        # 获取LiDAR和里程计数据
-        return None
-        # lidar_data = self._get_lidar_data()
-        # odometry_data = self._get_odometry_data()
-        
-        # # 执行AMCL定位
-        # try:
-        #     result = self.amcl_localizer.localize(lidar_data, odometry_data)
-        #     if result is not None and isinstance(result, dict):
-        #         # 确保所有必要的键都存在
-        #         required_keys = ['position_estimated', 'orientation_estimated', 'velocity_estimated']
-        #         if all(key in result for key in required_keys):
-        #             self.amcl_result = result
-        # except Exception as e:
-        #     print(f"AMCL定位获取失败: {e}")
-        
-        # # 组合状态向量
-        # # 注意：总共应该是12维，但当前是14维，需要调整
-        # position = self.amcl_result['position_estimated'][:3]  # 确保是3维
-        # orientation = self.amcl_result['orientation_estimated'][:3]  # 确保是3维
-        # velocity = self.amcl_result['velocity_estimated'][:3]  # 确保是3维
-        # prev_velocity = self.state_buffer['previous_velocity'][:2]  # 只取前2维
-        # acceleration = self._estimate_acceleration()  # 2维
-        
-        # amcl_state = np.concatenate([
-        #     position,       # 3维 - 估计位置
-        #     orientation,    # 3维 - 估计姿态
-        #     velocity,       # 3维 - 估计速度
-        #     prev_velocity,  # 2维 - 历史速度（只取xy）
-        #     acceleration    # 1维 - 加速度（只取线性加速度）
-        # ])
-        
-        # return amcl_state
     
     def _get_lidar_data(self,norm_lidar=False):
         """获取LiDAR数据"""
@@ -1204,13 +1174,14 @@ class ROSbotNavigationEnv(gym.Env):
                 indices1 = np.arange(8, 8+60, 6)
                 # 从339开始，每隔6个下标选一个，一共选择20个点作为激光雷达数据输入
                 indices2 = np.arange(339, 339+60, 6)
-                indices = np.concatenate([indices1, indices2])
+                indices = np.concatenate([indices2,indices1])
                 data = np.array([ranges[i] for i in indices])
-                # 限制范围和归一化
-                data = np.clip(data, 0.01, 10.0) / 10.0
+                # 仅限制上限为10米，不做归一化
+                data = np.clip(data, 0.1, 10.0)
+                data = np.nan_to_num(data, nan=0.1)
                 # 维护最近一次的障碍物最近距离（米）供信息输出/调试
                 try:
-                    self.min_obstacle_distance = float(np.min(data) * 10.0)
+                    self.min_obstacle_distance = float(np.min(data))
                 except Exception:
                     pass
                 return data.astype(np.float32),lidar_data

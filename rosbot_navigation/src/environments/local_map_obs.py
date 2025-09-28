@@ -53,8 +53,8 @@ class LocalMapObservation:
         )
     
     def lidar_to_local_map(self, 
-                          lidar_ranges: np.ndarray, 
-                          robot_pose: Tuple[float, float, float]) -> np.ndarray:
+                           lidar_ranges: np.ndarray, 
+                           robot_pose: Tuple[float, float, float]) -> np.ndarray:
         """
         将激光雷达数据转换为局部地图
         
@@ -72,15 +72,28 @@ class LocalMapObservation:
         robot_x_pixel = self.map_size // 2
         robot_y_pixel = self.map_size // 2
         
+        # 防御性编程：处理空或无效的激光数据
+        if lidar_ranges is None:
+            return local_map.reshape(1, self.map_size, self.map_size)
+        
+        # 确保为一维数组
+        lidar_ranges = np.asarray(lidar_ranges).reshape(-1)
+        
         # 激光雷达参数 - 8-399范围，逆时针旋转一圈
         num_rays = len(lidar_ranges)
+        if num_rays == 0:
+            return local_map.reshape(1, self.map_size, self.map_size)
         angle_min = -math.pi  # 起始角度
         angle_max = math.pi   # 结束角度
         angle_increment = (angle_max - angle_min) / num_rays
         
         # 处理每条激光束
         for i, range_val in enumerate(lidar_ranges):
-            if range_val < 0.01 or range_val > self.max_range:  # 无效数据或超出范围
+            # 跳过非有限值 (NaN, inf)
+            if not np.isfinite(range_val):
+                continue
+            # 无效数据或超出范围
+            if range_val < 0.01 or range_val > self.max_range:
                 continue
                 
             # 计算激光束角度 (相对于机器人朝向)
@@ -94,9 +107,14 @@ class LocalMapObservation:
                 # 忽略机器人朝向与位置，固定以机器人中心为原点，角度不随姿态变化
                 dx = range_val * math.cos(angle)
                 dy = range_val * math.sin(angle)
-            # 转换为相对于机器人中心的地图像素坐标
-            end_x_pixel = int((dx + self.map_physical_size/2) / self.resolution)
-            end_y_pixel = int((dy + self.map_physical_size/2) / self.resolution)
+            
+            # 如果由于数值问题导致dx/dy为非有限值，直接跳过
+            if not (np.isfinite(dx) and np.isfinite(dy)):
+                continue
+            
+            # 转换为相对于机器人中心的地图像素坐标（四舍五入以减少系统性偏差）
+            end_x_pixel = int(round((dx + self.map_physical_size/2) / self.resolution))
+            end_y_pixel = int(round((dy + self.map_physical_size/2) / self.resolution))
             
             # 确保坐标在地图范围内
             end_x_pixel = np.clip(end_x_pixel, 0, self.map_size - 1)
