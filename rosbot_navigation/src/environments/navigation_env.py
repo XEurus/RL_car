@@ -396,12 +396,13 @@ class ROSbotNavigationEnv(gym.Env):
 
         # (max_steps_per_episode, collision_threshold, success_threshold)
         params_by_stage = {
-            'start':  (60, 0.05, 0.25),
-            'easy':   (70,  0.05, 0.25),
-            'medium': (80,  0.05, 0.22),
-            'hard':   (110,  0.05, 0.20),
-            'end':    (130,  0.05, 0.20),
-            'all':    (130,  0.05, 0.20),
+            'start':  (100, 0.05, 0.05),
+            'easy':   (200,  0.05, 0.25),
+            'medium': (230,  0.05, 0.25),
+            'hard':   (250,  0.05, 0.25),
+            'hard2':   (300,  0.05, 0.25),
+            'end':    (300,  0.05, 0.25),
+            'all':    (300,  0.05, 0.25),
         }
         max_steps, coll_th, succ_th = params_by_stage.get(stage, params_by_stage['end'])
         self.max_steps_per_episode = int(max_steps)
@@ -670,14 +671,19 @@ class ROSbotNavigationEnv(gym.Env):
         return distance, target_pos
 
     def _calculate_angle_to_target(self, target_pos):
-        """计算当前航向与目标方向的角度偏差（-π, π）"""
+        """
+        计算带符号的相对偏航角（-π, π）：
+        定义为“车辆当前朝向射线”与“车辆指向目标的连线”之间的有向角度，
+        车辆正对目标时为0，左偏为正，右偏为负。
+        """
         current_pos = self._get_sup_position()
         current_orient = self._get_sup_orientation()
         vec_to_target = target_pos - current_pos
         target_heading = math.atan2(float(vec_to_target[1]), float(vec_to_target[0]))
         current_heading = float(current_orient[2])
         angle = target_heading - current_heading
-        angle = math.atan2(math.sin(angle), math.cos(angle))
+        angle = (angle + math.pi) % (2 * math.pi) - math.pi
+        # print(f"target_heading={target_heading}, current_heading={current_heading}, angle={angle}")
         return angle
 
     def _get_lidar_features(self):
@@ -861,6 +867,7 @@ class ROSbotNavigationEnv(gym.Env):
         if self.robot_node:
             # 从机器人节点获取旋转矩阵
             rotation = self.robot_node.getOrientation()
+            #print("Rotation:", rotation)
             # 转换为欧拉角 (roll, pitch, yaw)
             # 从旋转矩阵提取欧拉角
             # 矩阵格式为[r11 r21 r31 r12 r22 r32 r13 r23 r33]
@@ -1298,7 +1305,7 @@ class ROSbotNavigationEnv(gym.Env):
         heading_error = target_heading - current_heading
         # 归一化到[-π, π]
         heading_error = math.atan2(math.sin(heading_error), math.cos(heading_error))
-        
+        print(f"current_heading: {current_heading}, target_heading: {target_heading}, heading_error: {heading_error}")
         # 角加速度（保留），角速度不再纳入观测
         angular_acceleration = self._calculate_angular_acceleration()
         
@@ -1354,7 +1361,12 @@ class ROSbotNavigationEnv(gym.Env):
             'success_threshold': self.success_threshold,
             'task_info': self.task_info,
             'terminate': False,  # 初始化终止标志
-            'args': getattr(self, 'args', None)  # 传递训练时的参数对象
+            'args': getattr(self, 'args', None),  # 传递训练时的参数对象
+            # 暴露上一次生效的左右轮角速度（由执行器估计/限幅后）
+            'get_last_wheel_speeds': lambda: (
+                float(getattr(self, '_prev_left_speed', 0.0)),
+                float(getattr(self, '_prev_right_speed', 0.0))
+            )
         }
         
         # 调用奖励函数计算奖励

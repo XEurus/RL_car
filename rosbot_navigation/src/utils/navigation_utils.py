@@ -409,15 +409,15 @@ class NavigationUtils:
         if stage == 'start':
             start_key = 'normal_start' if target_type == 'normal' else 'unload_start'
             start_pos = self.fixed_positions[start_key]
-            return start_pos, target_pos, 'align'
+            return start_pos, target_pos, 'exact_noise'
 
         if stage in ('easy', 'medium', 'hard', 'hard2'):
             # 分阶段半径范围：easy(2,4), medium(3,5), hard(4,7)
             r_ranges = {
-                'easy': (2.0, 4.0),
-                'medium': (3.0, 6.0),
-                'hard': (4.0, 8.0),
-                'hard2': (5.0, 10.0)
+                'easy': (2.0, 7.0),
+                'medium': (4.0,9.0),
+                'hard': (5.0, 10.0),
+                'hard2': (7.0, 10.0)
             }
             r_min, r_max = r_ranges[stage]
             start_pos = self._sample_in_annulus_avoid(center=target_pos, r_min=r_min, r_max=r_max)

@@ -13,8 +13,8 @@ WorldInfo {
 }
 Viewpoint {
   fieldOfView 1.2
-  orientation -0.5772083109075209 0.5720469667123995 0.582745942666639 2.0941181592852063
-  position 0.183321512231177 -1.3667927595813496 22.791157089731293
+  orientation -0.5771331674760135 0.5676983936032822 0.5870569315657184 2.094230876019181
+  position -0.29577726052566417 -1.5967764358477345 23.854473429960297
 }
 TexturedBackgroundLight {
 }
@@ -51,14 +51,14 @@ DEF rosbot Rosbot {
   selfCollision TRUE
 }
 WoodenBox {
-  translation 0.848546 2.6961 0.3
+  translation 1.53855 2.2761 0.3
   immersionProperties [
     ImmersionProperties {
     }
   ]
 }
 WoodenBox {
-  translation 1.91243 1.0129 0.3
+  translation 2.95243 1.0129 0.3
   name "wooden box(9)"
   immersionProperties [
     ImmersionProperties {
@@ -66,23 +66,7 @@ WoodenBox {
   ]
 }
 WoodenBox {
-  translation 0.73897 -1.86178 0.3
-  name "wooden box(11)"
-  immersionProperties [
-    ImmersionProperties {
-    }
-  ]
-}
-WoodenBox {
-  translation 3.09678 1.97471 0.3
-  name "wooden box(12)"
-  immersionProperties [
-    ImmersionProperties {
-    }
-  ]
-}
-WoodenBox {
-  translation 0.28292 0.71978 0.3
+  translation 1.77292 -0.70022 0.3
   name "wooden box(10)"
   immersionProperties [
     ImmersionProperties {
@@ -90,15 +74,7 @@ WoodenBox {
   ]
 }
 WoodenBox {
-  translation 2.35996 -0.757085 0.3
-  name "wooden box(6)"
-  immersionProperties [
-    ImmersionProperties {
-    }
-  ]
-}
-WoodenBox {
-  translation -1.81525 0.712079 0.3
+  translation -1.11525 -0.237921 0.3
   name "wooden box(1)"
   immersionProperties [
     ImmersionProperties {
@@ -106,7 +82,7 @@ WoodenBox {
   ]
 }
 WoodenBox {
-  translation -0.53516 -0.751012 0.3
+  translation -0.04516 -2.63101 0.3
   name "wooden box(5)"
   immersionProperties [
     ImmersionProperties {
@@ -114,7 +90,7 @@ WoodenBox {
   ]
 }
 WoodenBox {
-  translation -0.83865 2.00798 0.3
+  translation 0.60135 0.95798 0.3
   name "wooden box(4)"
   immersionProperties [
     ImmersionProperties {
@@ -122,7 +98,7 @@ WoodenBox {
   ]
 }
 WoodenBox {
-  translation -2.75535 2.87372 0.3
+  translation -0.90535 2.87372 0.3
   name "wooden box(3)"
   immersionProperties [
     ImmersionProperties {
@@ -130,7 +106,7 @@ WoodenBox {
   ]
 }
 WoodenBox {
-  translation -3.70712 1.68647 0.3
+  translation -1.63712 1.19647 0.3
   name "wooden box(8)"
   immersionProperties [
     ImmersionProperties {
@@ -138,7 +114,7 @@ WoodenBox {
   ]
 }
 WoodenBox {
-  translation -2.70199 -1.3955 0.3
+  translation -2.47199 -2.0255 0.3
   name "wooden box(7)"
   immersionProperties [
     ImmersionProperties {

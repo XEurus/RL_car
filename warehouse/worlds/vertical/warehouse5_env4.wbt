@@ -13,8 +13,8 @@ WorldInfo {
 }
 Viewpoint {
   fieldOfView 1.2
-  orientation -0.5772083109075209 0.5720469667123995 0.582745942666639 2.0941181592852063
-  position 0.183321512231177 -1.3667927595813496 22.791157089731293
+  orientation -0.5489054206056424 0.5549868310723198 0.6250539629232399 2.014388493344475
+  position -0.9340417653011693 -4.368311045594452 22.71140146795428
 }
 TexturedBackgroundLight {
 }
@@ -42,63 +42,21 @@ Solid {
   locked TRUE
 }
 DEF rosbot Rosbot {
-  hidden linearVelocity_0 -0.019791823124461948 0.00029386691256915256 -6.924121351082745e-06
-  hidden angularVelocity_0 -0.00011342343770341086 -0.00020842084346801577 1.144722957838967
-  translation 5.001986271596934 0.20652447090061452 -0.0005190648564590283
-  rotation 1.1980368129552872e-05 2.826246108869191e-05 -0.999999999528852 1.060429559361052
+  translation -5.000000000264386 3.0000000026336733 -0.0005440888481006989
+  rotation 0.0034623679130298163 0.9999940057402034 -2.2183254949298354e-05 3.0725298660524996e-05
   controller "<extern>"
   supervisor TRUE
   selfCollision TRUE
 }
 WoodenBox {
-  translation 0.848546 2.6961 0.3
+  translation 1.45855 1.8261 0.3
   immersionProperties [
     ImmersionProperties {
     }
   ]
 }
 WoodenBox {
-  translation 1.91243 1.0129 0.3
-  name "wooden box(9)"
-  immersionProperties [
-    ImmersionProperties {
-    }
-  ]
-}
-WoodenBox {
-  translation 0.73897 -1.86178 0.3
-  name "wooden box(11)"
-  immersionProperties [
-    ImmersionProperties {
-    }
-  ]
-}
-WoodenBox {
-  translation 3.09678 1.97471 0.3
-  name "wooden box(12)"
-  immersionProperties [
-    ImmersionProperties {
-    }
-  ]
-}
-WoodenBox {
-  translation 0.28292 0.71978 0.3
-  name "wooden box(10)"
-  immersionProperties [
-    ImmersionProperties {
-    }
-  ]
-}
-WoodenBox {
-  translation 2.35996 -0.757085 0.3
-  name "wooden box(6)"
-  immersionProperties [
-    ImmersionProperties {
-    }
-  ]
-}
-WoodenBox {
-  translation -1.81525 0.712079 0.3
+  translation -0.055248 -0.137921 0.3
   name "wooden box(1)"
   immersionProperties [
     ImmersionProperties {
@@ -106,7 +64,7 @@ WoodenBox {
   ]
 }
 WoodenBox {
-  translation -0.53516 -0.751012 0.3
+  translation 2.24475 0.332079 0.3
   name "wooden box(5)"
   immersionProperties [
     ImmersionProperties {
@@ -114,7 +72,15 @@ WoodenBox {
   ]
 }
 WoodenBox {
-  translation -0.83865 2.00798 0.3
+  translation 0.52475 -2.73792 0.3
+  name "wooden box(6)"
+  immersionProperties [
+    ImmersionProperties {
+    }
+  ]
+}
+WoodenBox {
+  translation -1.74865 -1.78202 0.3
   name "wooden box(4)"
   immersionProperties [
     ImmersionProperties {
@@ -122,7 +88,7 @@ WoodenBox {
   ]
 }
 WoodenBox {
-  translation -2.75535 2.87372 0.3
+  translation -0.34535 2.56372 0.3
   name "wooden box(3)"
   immersionProperties [
     ImmersionProperties {
@@ -130,7 +96,7 @@ WoodenBox {
   ]
 }
 WoodenBox {
-  translation -3.70712 1.68647 0.3
+  translation -2.32712 1.04647 0.3
   name "wooden box(8)"
   immersionProperties [
     ImmersionProperties {
@@ -138,15 +104,7 @@ WoodenBox {
   ]
 }
 WoodenBox {
-  translation -2.70199 -1.3955 0.3
-  name "wooden box(7)"
-  immersionProperties [
-    ImmersionProperties {
-    }
-  ]
-}
-WoodenBox {
-  translation -3.38615 -0.041712 0.3
+  translation 1.80385 -1.24171 0.3
   name "wooden box(2)"
   immersionProperties [
     ImmersionProperties {
@@ -265,8 +223,7 @@ Door {
   translation -3 -3.9 0
   rotation 0 0 -1 1.5707996938995747
   size 0.2 2 2.4
-  canBeOpen FALSE
-  position -1.5698596704182108
+  position -0.01565301432327793
   frameAppearance MattePaint {
     baseColor 0 0 0
   }
