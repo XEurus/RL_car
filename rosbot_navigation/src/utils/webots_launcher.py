@@ -476,22 +476,27 @@ def start_webots_instance(instance_id: int,
 
 
 def stop_webots_instance(proc: subprocess.Popen, wait_seconds: int = 5) -> None:
-    """停止 Webots 实例。"""
+    """停止 Webots 实例。
+    
+    注意：不要手动关闭 proc.stdout，因为后台 drain 线程正在读取它。
+    当进程被终止后，stdout 会自动关闭，后台线程也会自然退出。
+    """
     try:
-        # 先关闭 stdout，解除可能的管道阻塞
-        try:
-            if getattr(proc, 'stdout', None):
-                proc.stdout.close()
-        except Exception:
-            pass
-
         if proc.poll() is None:
+            # 先尝试优雅终止
             proc.terminate()
             try:
                 proc.wait(timeout=wait_seconds)
             except subprocess.TimeoutExpired:
+                # 超时后强制杀死
                 proc.kill()
-    except Exception:
+                # 再等待一小段时间确保进程完全退出
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+    except Exception as e:
+        # 忽略所有异常，确保清理过程不会失败
         pass
 
 

@@ -1,3 +1,0 @@
-Cargo type: normal
-Total steps: 50000
-Completed at: 2025-09-12 17:18:41.114886

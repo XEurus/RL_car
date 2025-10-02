@@ -15,14 +15,15 @@ class NavigationUtils:
     
     def __init__(self):
         # 固定的位置坐标
-        self.standard_positions = {
+        self.fixed_positions = {
             'normal_start': [3.0, 0.2, 0.0],
             'unload_start': [-3.0, -2.0, 0.0],
             'start': [-5.0, 3.0, 0.0],       # 起点
             'unload': [-5.0, -2.0, 0.0],     # 卸货点
             'dangerous': [5.0, 3.0, 0.0],    # 危险货物点
             'fragile': [5.0, 1.7, 0.0],      # 易碎货物点
-            'normal': [5.0, 0.2, 0.0]        # 普通货物点
+            'normal': [5.0, 0.2, 0.0],       # 普通货物点
+            'smaller': [-0.75, -0.55, 0.0]   # 小环境卸货点
         }
         
         self.easy_positions_areas = {
@@ -62,7 +63,6 @@ class NavigationUtils:
 
         # 兼容别名，避免KeyError
         self.position_areas = self.difficulty_position_areas
-        self.fixed_positions = self.standard_positions
 
         self.woodenbox_area_env1 = {
             'forbidden_zones': [
@@ -154,7 +154,7 @@ class NavigationUtils:
         
         return [x, y, z]
     
-    def get_navigation_task(self, cargo_type: str, difficulty_type: str, task_stage: str = 'base') -> Tuple[List[float], List[float]]:
+    def get_navigation_task(self, cargo_type: str) -> Tuple[List[float], List[float]]:
         """
         根据货物类型和任务阶段获取导航任务
         
@@ -172,13 +172,9 @@ class NavigationUtils:
         """
         if cargo_type not in self.navigation_config:
             cargo_type = 'normal'  # 默认为普通货物
-        
+        self.use_random_targets = False
         # 根据任务阶段选择起点和终点
-        if task_stage == 'base':
-            if difficulty_type == 'start':
-                start_pos = self.fixed_positions['start']
-                target_type = random.choice(['dangerous', 'fragile', 'normal'])
-                target_pos = self.fixed_positions[target_type]
+        if cargo_type == 'normal':
             if random.random() < 0.7:
                 # 从起点到各个货物点
                 if self.use_random_targets:
@@ -200,7 +196,7 @@ class NavigationUtils:
                     start_pos = self.fixed_positions['normal']
                     target_pos = self.fixed_positions['unload']
         
-        elif task_stage == 'dangerous_to_unload':
+        elif cargo_type == 'dangerous':
             # 从危险货物点到卸货点
             if self.use_random_targets:
                 start_pos = self._generate_random_position_in_area('dangerous_area')
@@ -209,7 +205,7 @@ class NavigationUtils:
                 start_pos = self.fixed_positions['dangerous']
                 target_pos = self.fixed_positions['unload']
         
-        elif task_stage == 'fragile_to_unload':
+        elif cargo_type == 'fragile':
             # 从易碎货物点到卸货点
             if self.use_random_targets:
                 start_pos = self._generate_random_position_in_area('fragile_area')
@@ -218,7 +214,7 @@ class NavigationUtils:
                 start_pos = self.fixed_positions['fragile']
                 target_pos = self.fixed_positions['unload']
         
-        elif task_stage == 'normal_to_unload':
+        elif cargo_type == 'normal_to_unload':
             # 从普通货物点到卸货点
             if self.use_random_targets:
                 start_pos = self._generate_random_position_in_area('normal_area')
@@ -406,6 +402,12 @@ class NavigationUtils:
         target_type = self._choose_target_type()
         target_pos = self._get_target_pos(target_type)
 
+        if stage == 'small':
+            start_pos = self.fixed_positions['start']
+            angle_mode = 'exact_noise'
+            target_pos = self.fixed_positions['smaller']
+            return start_pos, target_pos, angle_mode
+
         if stage == 'start':
             start_key = 'normal_start' if target_type == 'normal' else 'unload_start'
             start_pos = self.fixed_positions[start_key]
@@ -428,8 +430,6 @@ class NavigationUtils:
             elif stage == 'hard':
                 angle_mode = 'axis'
             elif stage == 'hard2':
-                angle_mode = 'axis'
-            elif stage == 'end':
                 angle_mode = 'axis'
             return start_pos, target_pos, angle_mode
 

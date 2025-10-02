@@ -3,6 +3,7 @@ ROSbot导航环境的奖励函数模块
 包含各种奖励计算逻辑，用于强化学习训练
 """
 
+from doctest import debug
 import numpy as np
 import math
 from typing import Dict, List, Tuple, Any, Set
@@ -27,14 +28,14 @@ class RewardFunctions:
         # 原地打转检测变量
         self.previous_yaw_for_spin_check = 0.0
         self.total_rotation_in_place = 0.0
-        self.stuck_steps_for_spin_check = 3       # 卡住超过5个动作开始检测 (更敏感)
+        self.stuck_steps_for_spin_check = 5       # 卡住超过5个动作开始检测 (更敏感)
         self.spin_termination_threshold = 4*math.pi    # 累计旋转半圈就终止 (更严格)
         
         # 卡住检测变量
         self.consecutive_stuck_steps = 0
-        self.stuck_termination_threshold = 20      # 连续卡住超过15个动作就终止
+        self.stuck_termination_threshold = 40      # 连续卡住超过15个动作就终止
         self.previous_position = None
-        self.stuck_position_threshold = 0.1      # 单个动作位置变化小于此值认为卡住
+        self.stuck_position_threshold = 0.05     # 单个动作位置变化小于此值认为卡住
         self.debug = False
         self.turn_steps = 0
         # 连续同方向旋转跟踪（用于靠墙惩罚叠加）
@@ -117,11 +118,9 @@ class RewardFunctions:
             try:
                 if env_state['detect_collision_simple']():
                     if -2 <= pose[0] <= 2 and -2.7 <= pose[1] <= 2.7:
-                        # 在指定区域内碰撞，给予惩罚但不结束回合
-                        rewards['collision_penalty'] = -30.0
-                        collision_terminate = False
+                        rewards['collision_penalty'] = -500.0
+                        collision_terminate = True
                     else:
-                        # 在指定区域外碰撞，给予强惩罚并结束回合
                         rewards['collision_penalty'] = -500.0
                         collision_terminate = True
                         # 不提前返回，终止标志将在后续逻辑中处理
@@ -168,9 +167,11 @@ class RewardFunctions:
                 linear_vel = 0.0
                 angular_vel = 0.0
                 angular_vel_signed = 0.0
-            
+            lw, rw = env_state.get('get_last_wheel_speeds', lambda: (None, None))()
+
             if distance < DIST_THRESHOLD:
-                rewards['goal_reward'] = 300.0
+                rewards['goal_reward'] = 2000.0
+
             # if distance < DIST_THRESHOLD:
             #     # 增加停车奖励：速度越小，奖励越大
             #     stop_bonus = (1.0 - min(1.0, linear_vel + angular_vel))*10
@@ -188,7 +189,7 @@ class RewardFunctions:
 
             # 4) 时间惩罚（随步数递增）
             time_penalty = 1 + (float(env_state['episode_steps']))
-            rewards['time_penalty'] = -time_penalty*args.time_k*((distance+1)/3)
+            rewards['time_penalty'] = -time_penalty*args.time_k
 
             # 5) 距离基奖励
             liner_distance_reward = args.liner_distance_reward
@@ -197,13 +198,13 @@ class RewardFunctions:
             elif liner_distance_reward == 1:
                 dist_reward = (-0.5)*(distance)*(distance)+50
             elif liner_distance_reward == 2:
-                dist_reward = 1/(distance+0.1)*50
+                dist_reward = 4/(distance+1)*50
             rewards['distance_reward'] = dist_reward*args.distance_k
 
             # 6) 距离变化（靠近奖励）
             prev_d = self.prev_distance_to_target if self.prev_distance_to_target is not None else distance
             dist_change = prev_d - distance
-            rewards['distance_change_reward'] = dist_change*args.delta_distance_k*((distance+1)/3)
+            rewards['distance_change_reward'] = dist_change*args.delta_distance_k*((distance+1)/4)
             # print(f"Distance change reward: {rewards['distance_change_reward']}")
 
             # 7) 探索奖励（新位置）
@@ -223,41 +224,6 @@ class RewardFunctions:
             movement_reward = distance_moved*args.movement_reward_k*(self.consecutive_stuck_steps/3 if self.consecutive_stuck_steps>3 else 1)
             #print(f"Movement reward: {movement_reward}")
             rewards['movement_reward'] = movement_reward
-
-            # 8) 靠近墙壁惩罚（LiDAR特征）
-            lidar_features = env_state['get_lidar_features']()
-            wall_prox_penalty = 0.0
-            if -2 <= pose[0] <= 2 and -2.7 <= pose[1] <= 2.7:
-                for feature in lidar_features:
-                    if feature <= 0.5:
-                        wall_prox_penalty += (0.5 - float(feature))
-            else:
-                for feature in lidar_features:
-                    if feature <= 0.3:
-                        wall_prox_penalty += (0.3 - float(feature))
-
-            # 连续同方向旋转时提高靠墙惩罚
-            # 仅当“旋转明显且线速度较小”才计入旋转方向
-            rot_ang_thr = getattr(args, 'rotation_ang_threshold', 0.3)
-            lin_thr = getattr(args, 'rotation_lin_threshold', 0.2)
-            curr_sign = 0
-            if angular_vel > rot_ang_thr and linear_vel < lin_thr:
-                curr_sign = 1 if angular_vel_signed > 0 else -1
-            # 更新旋转连续计数
-            if curr_sign == 0:
-                self.rotation_streak = 0
-                self.last_rotation_sign = 0
-            else:
-                if curr_sign == self.last_rotation_sign:
-                    self.rotation_streak += 1
-                else:
-                    self.rotation_streak = 1
-                    self.last_rotation_sign = curr_sign
-            # 近墙时放大靠墙惩罚：mult = 1 + beta * streak
-            beta = float(getattr(args, 'same_dir_spin_wall_penalty_k', 1))
-            if self.rotation_streak >= 2:
-                wall_prox_penalty *= (1.0 + beta * self.rotation_streak)
-            rewards['wall_proximity_penalty'] = wall_prox_penalty*args.wall_proximity_penalty_k*((distance+1)/3)
 
             # 9) 精确的原地停留检测：参考成功代码的逻辑
             #distance_moved = float(np.linalg.norm(np.array(robot_position) - np.array(self.reward_previous_position)))
@@ -291,7 +257,7 @@ class RewardFunctions:
             # rewards['same_spot_penalty'] = -same_spot_penalty
 
             # 10) 原地打转惩罚：
-            if angular_vel-linear_vel > 0.4:
+            if abs(lw-rw) > 20:
                 self.turn_steps += 1
                 #print(f"Turn steps: {self.turn_steps}")
             else:
@@ -306,7 +272,7 @@ class RewardFunctions:
                 self.total_rotation_in_place += delta_yaw
                 # 实时更新上一步的朝向，用于计算下一步的角度变化
                 self.previous_yaw_for_spin_check = env_state['get_sup_orientation']()[2]
-
+                
                 # 如果累计旋转超过阈值，给予一个惩罚
                 if self.total_rotation_in_place > self.spin_termination_threshold:
                     rewards['spin_penalty'] = -500.0
@@ -315,7 +281,43 @@ class RewardFunctions:
             else:
                 rewards['spin_penalty'] = 0
             
+            # 连续同方向旋转时提高靠墙惩罚
+            # 仅当“旋转明显且线速度较小”才计入旋转方向
+            # rot_ang_thr = getattr(args, 'rotation_ang_threshold', 0.3)
+            # lin_thr = getattr(args, 'rotation_lin_threshold', 0.2)
+            # curr_sign = 0
+            # if angular_vel > rot_ang_thr and linear_vel < lin_thr:
+            #     curr_sign = 1 if angular_vel_signed > 0 else -1
+            # # 更新旋转连续计数
+            # if curr_sign == 0:
+            #     self.rotation_streak = 0
+            #     self.last_rotation_sign = 0
+            # else:
+            #     if curr_sign == self.last_rotation_sign:
+            #         self.rotation_streak += 1
+            #     else:
+            #         self.rotation_streak = 1
+            #         self.last_rotation_sign = curr_sign
+            # # 近墙时放大靠墙惩罚：mult = 1 + beta * streak
+            beta = float(getattr(args, 'same_dir_spin_wall_penalty_k', 1))
+               # 8) 靠近墙壁惩罚（LiDAR特征）
+            lidar_features = env_state['get_lidar_features']()
+            wall_prox_penalty = 0.0
+            if -2 <= pose[0] <= 2 and -2.7 <= pose[1] <= 2.7:
+                for feature in lidar_features:
+                    if feature <= 1:
+                        wall_prox_penalty += (1 - float(feature))
+            else:
+                for feature in lidar_features:
+                    if feature <= 1:
+                        wall_prox_penalty += (1 - float(feature))
 
+            # if self.turn_steps >= 3:
+            #     wall_prox_penalty *= (1.0 + beta * self.turn_steps)
+            rewards['wall_proximity_penalty'] = wall_prox_penalty*args.wall_proximity_penalty_k
+            #((distance+1)/3)
+
+            
             # 11) 角度奖励：仅在“前方有路径”且“与目标夹角小于90°”时给予奖励
             angle_to_target = self._calculate_angle_to_target(env_state)
             abs_angle = abs(angle_to_target)
@@ -346,31 +348,56 @@ class RewardFunctions:
             else:
                 rewards['front_clear'] = 0.0
 
-            # 仅在两个条件同时满足时给予角度奖励：
-            # 1) 前方有路径(front_clear)
-            # 2) 与目标角度差小于90度(abs_angle <= pi/2)
-            if front_clear and abs_angle <= (0.6 * math.pi):
-                angle_reward=(-5)*abs_angle*abs_angle +10
-                # angle_reward = 10.0 if abs_angle <= 0.3 else (3 / abs_angle)
-            else:
-                angle_reward = 0.0
-            rewards['angle_reward'] = angle_reward*args.angle_reward_k*(3/distance)
+            # # 无条件给予角度奖励，确保机器人始终有朝向目标的引导信号
+            # # 即使前方无路或背离目标，也应该知道需要转向
+            # angle_reward = (-5)*abs_angle*abs_angle + 10
+            # # 当前方有明显空间时，放大角度奖励
+            # if front_clear:
+            #     angle_reward *= 1.5  # 前方有路时奖励增强50%
+            # rewards['angle_reward'] = angle_reward*args.angle_reward_k*(3/distance)
 
 
-            # 12) 角度变化奖励：若本步与目标的夹角较上一步更小，则给予正向奖励
-            try:
-                prev_abs = self.prev_abs_angle_to_target
-                angle_delta = (prev_abs - abs_angle) if (prev_abs is not None) else 0.0
-                # 仅对“更接近目标方向”的变化奖励，负向变化不额外惩罚（已有其他项约束）
-                angle_change_k = getattr(args, 'angle_change_k', getattr(args, 'angle_reward_k', 1.0))
-                rewards['angle_change_reward'] = max(0.0, angle_delta)* angle_change_k
-            except Exception as e:
-                # 兜底，避免日志噪音
-                print(f"Error in angle change reward calculation: {e}")
-                self._debug(f"Error in angle change reward calculation: {e}")
-                rewards['angle_change_reward'] = 0.0
-            # 更新上一时刻的角度绝对值
-            self.prev_abs_angle_to_target = abs_angle
+            # # 12) 角度变化奖励：若本步与目标的夹角较上一步更小，则给予正向奖励
+            # try:
+            #     prev_abs = self.prev_abs_angle_to_target
+            #     angle_delta = (prev_abs - abs_angle) if (prev_abs is not None) else 0.0
+            #     # 仅对“更接近目标方向”的变化奖励，负向变化不额外惩罚（已有其他项约束）
+            #     angle_change_k = getattr(args, 'angle_change_k', getattr(args, 'angle_reward_k', 1.0))
+            #     rewards['angle_change_reward'] = max(0.0, angle_delta)* angle_change_k
+            # except Exception as e:
+            #     # 兜底，避免日志噪音
+            #     print(f"Error in angle change reward calculation: {e}")
+            #     self._debug(f"Error in angle change reward calculation: {e}")
+            #     rewards['angle_change_reward'] = 0.0
+            # # 更新上一时刻的角度绝对值
+            # self.prev_abs_angle_to_target = abs_angle
+            
+            # 13) 方向性移动奖励：如果移动方向与目标方向一致，给予额外奖励
+            # 这确保机器人不仅转向正确，还要朝正确方向移动
+            directional_reward = 0.0
+            if distance_moved > 0.10:  # 确实在移动
+                try:
+                    # 计算实际移动方向
+                    movement_angle = math.atan2(
+                        robot_position[1] - self.reward_previous_position[1],
+                        robot_position[0] - self.reward_previous_position[0]
+                    )
+                    # 计算目标方向
+                    target_pos = env_state['task_info']['target_pos']
+                    target_angle = math.atan2(
+                        target_pos[1] - robot_position[1],
+                        target_pos[0] - robot_position[0]
+                    )
+                    # 计算方向差异
+                    angle_diff = abs((target_angle - movement_angle + math.pi) % (2*math.pi) - math.pi)
+                    # 角度差越小，奖励越大（从1.0到0）
+                    alignment = max(0, 1.0 - angle_diff/math.pi)
+                    # 奖励 = 对齐度 × 移动距离 × 系数 X 转圈衰减 X 距离目标加成
+                    directional_reward = alignment * dist_change * getattr(args, 'directional_movement_k', 15.0)*(4/(self.turn_steps+1))*((distance-6)*(distance-6)*0.2+1)
+                except Exception as e:
+                    print(f"Error in directional movement reward calculation: {e}")
+                    directional_reward = 0.0
+            rewards['directional_movement'] = directional_reward
 
             # === 调试输出：左右轮速度、目标角度与距离 ===
             try:
@@ -378,10 +405,6 @@ class RewardFunctions:
             except Exception:
                 dbg = False
             if dbg:
-                try:
-                    lw, rw = env_state.get('get_last_wheel_speeds', lambda: (None, None))()
-                except Exception:
-                    lw, rw = None, None
                 try:
                     dist_dbg, _ = env_state['calculate_distance_to_target']()
                 except Exception:
@@ -418,10 +441,11 @@ class RewardFunctions:
 
             # === 奖励缩放到 -1 ~ 1 区间 ===
             # 使用对称线性缩放，以 |reward| = 300 时达到饱和；超出范围则对称裁剪
-            scale_limit = 300.0
-            scaled_reward = total_reward / scale_limit
+            #scale_limit = 300.0
+            #scaled_reward = total_reward / scale_limit
             # 防止数值爆炸，保持对称裁剪
-            scaled_reward = float(np.clip(scaled_reward, -1.0, 1.0))
+            #scaled_reward = float(np.clip(scaled_reward, -1.0, 1.0))
+            scaled_reward = total_reward
 
             # print(f"""
             # Total reward: {total_reward},\n

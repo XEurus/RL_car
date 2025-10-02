@@ -11,45 +11,32 @@
 set -euo pipefail
 
 # Resolve paths
-TRAIN_PY="/root/workspace/RL_car2/rosbot_navigation/train_stage1.py"
+TRAIN_PY="/root/workspace/RL_car2/rosbot_navigation/train_single.py"
 
 echo "==> Manual curriculum run"
 
-# ==========================
-# User manual configuration
-# Edit the ARGS arrays per stage as needed.
-# You can override TOTAL_STEPS per stage with STAGE_TOTAL_STEPS env or inline.
-# Examples of useful flags:
-#   --distributed true
-#   --device auto
-#   --learning_rate 3e-4
-#   --enable_speed_smoothing true
-#   --lr_schedule_type cosine --lr_final 1e-5
-#   --exploration_noise_type linear --exploration_noise_init 0.2 --exploration_noise_final 0.05
-# ==========================
-BASE_MODEL_DIR="/root/workspace/RL_car2/rosbot_navigation/results/test20"
+BASE_MODEL_DIR="/root/workspace/RL_car2/rosbot_navigation/results/single_vertical_3"
 prev_model_path=""
-train_id="2"
-experiment_name="930归一化测试"
-remark="930归一化测试"
+train_id="1"
+experiment_name="Single-Vertical-3"
 
-# ---------- Stage: start ----------
-stage=start
-total_steps=200000
-STAGE_DIR="$BASE_MODEL_DIR/${stage}_${train_id}"
+# ---------- 无障碍物 ----------
+stage=end
+remark="env1"
+WORLD_PATH="/root/workspace/RL_car2/warehouse/worlds/vertical/warehouse5_env1.wbt"
+total_steps=50000
+STAGE_DIR="$BASE_MODEL_DIR/${remark}_${train_id}"
 mkdir -p "$STAGE_DIR"
 LOG_FILE="$STAGE_DIR/train.log"
 echo "\n==== Training stage: $stage | $(date) ====" | tee -a "$LOG_FILE"
 ARGS=(
   --total_steps "$total_steps"
-  --models_dir "$STAGE_DIR"
+  --model_dir "$STAGE_DIR"
   --curriculum_stage "$stage"
   --remark "$remark"
   --experiment_name "$experiment_name"
-  # add more start-specific args below
-  # --learning_rate 3e-4
+  --world_1 "$WORLD_PATH"
 )
-
 /root/miniconda3/envs/rl_car/bin/python -u "$TRAIN_PY" "${ARGS[@]}" 2>&1 | tee -a "$LOG_FILE"
 echo "==== Stage $stage finished | $(date) ====\n" | tee -a "$LOG_FILE"
 ls "$STAGE_DIR"
@@ -63,133 +50,24 @@ else
   prev_model_path="$latest_zip"
 fi
 
-# ---------- Stage: easy ----------
-STAGE=easy
-STAGE_DIR="$BASE_MODEL_DIR/${STAGE}_${train_id}"
-mkdir -p "$STAGE_DIR"
-LOG_FILE="$STAGE_DIR/train.log"
-total_steps=300000
-echo "\n==== Training stage: $STAGE | $(date) ====" | tee -a "$LOG_FILE"
-ARGS=(
-  --total_steps "$total_steps"
-  --models_dir "$STAGE_DIR"
-  --curriculum_stage "$STAGE"
-  --prev_model_path "$prev_model_path"
-  --remark "$remark"
-  --experiment_name "$experiment_name"
-  # add more easy-specific args below
-)
-/root/miniconda3/envs/rl_car/bin/python -u "$TRAIN_PY" "${ARGS[@]}" 2>&1 | tee -a "$LOG_FILE"
-echo "==== Stage $STAGE finished | $(date) ====\n" | tee -a "$LOG_FILE"
-# Set prev_model_path to latest .zip inside this stage dir (fallback to dir if none)
-latest_zip=$(ls -1t "$STAGE_DIR"/*.zip 2>/dev/null | head -n 1 || true)
-if [[ -z "${latest_zip:-}" ]]; then
-  echo "WARNING: No .zip model found in $STAGE_DIR; using directory as prev_model_path"
-  prev_model_path="$STAGE_DIR"
-else
-  echo "Found previous model: $latest_zip"
-  prev_model_path="$latest_zip"
-fi
 
-# ---------- Stage: medium ----------
-STAGE=medium
-STAGE_DIR="$BASE_MODEL_DIR/${STAGE}_${train_id}"
-mkdir -p "$STAGE_DIR"
-LOG_FILE="$STAGE_DIR/train.log"
-total_steps=300000
-echo "\n==== Training stage: $STAGE | $(date) ====" | tee -a "$LOG_FILE"
-ARGS=(
-  --total_steps "$total_steps"
-  --models_dir "$STAGE_DIR"
-  --curriculum_stage "$STAGE"
-  --prev_model_path "$prev_model_path"
-  --remark "$remark"
-  --experiment_name "$experiment_name"
-  # add more medium-specific args below
-)
-/root/miniconda3/envs/rl_car/bin/python -u "$TRAIN_PY" "${ARGS[@]}" 2>&1 | tee -a "$LOG_FILE"
-echo "==== Stage $STAGE finished | $(date) ====\n" | tee -a "$LOG_FILE"
-# Set prev_model_path to latest .zip inside this stage dir (fallback to dir if none)
-latest_zip=$(ls -1t "$STAGE_DIR"/*.zip 2>/dev/null | head -n 1 || true)
-if [[ -z "${latest_zip:-}" ]]; then
-  echo "WARNING: No .zip model found in $STAGE_DIR; using directory as prev_model_path"
-  prev_model_path="$STAGE_DIR"
-else
-  echo "Found previous model: $latest_zip"
-  prev_model_path="$latest_zip"
-fi
-
-# ---------- Stage: hard ----------
-STAGE=hard
-STAGE_DIR="$BASE_MODEL_DIR/${STAGE}_${train_id}"
-mkdir -p "$STAGE_DIR"
-LOG_FILE="$STAGE_DIR/train.log"
-total_steps=300000
-echo "\n==== Training stage: $STAGE | $(date) ====" | tee -a "$LOG_FILE"
-ARGS=(
-  --total_steps "$total_steps"
-  --models_dir "$STAGE_DIR"
-  --curriculum_stage "$STAGE"
-  --prev_model_path "$prev_model_path"
-  --remark "$remark"
-  --experiment_name "$experiment_name"
-  # add more hard-specific args below
-)
-/root/miniconda3/envs/rl_car/bin/python -u "$TRAIN_PY" "${ARGS[@]}" 2>&1 | tee -a "$LOG_FILE"
-echo "==== Stage $STAGE finished | $(date) ====\n" | tee -a "$LOG_FILE"
-# Set prev_model_path to latest .zip inside this stage dir (fallback to dir if none)
-latest_zip=$(ls -1t "$STAGE_DIR"/*.zip 2>/dev/null | head -n 1 || true)
-if [[ -z "${latest_zip:-}" ]]; then
-  echo "WARNING: No .zip model found in $STAGE_DIR; using directory as prev_model_path"
-  prev_model_path="$STAGE_DIR"
-else
-  echo "Found previous model: $latest_zip"
-  prev_model_path="$latest_zip"
-fi
-
-
-STAGE=hard2
-STAGE_DIR="$BASE_MODEL_DIR/${STAGE}_${train_id}"
-mkdir -p "$STAGE_DIR"
-LOG_FILE="$STAGE_DIR/train.log"
-total_steps=300000
-echo "\n==== Training stage: $STAGE | $(date) ====" | tee -a "$LOG_FILE"
-ARGS=(
-  --total_steps "$total_steps"
-  --models_dir "$STAGE_DIR"
-  --curriculum_stage "$STAGE"
-  --prev_model_path "$prev_model_path"
-  --remark "$remark"
-  --experiment_name "$experiment_name"
-  # add more hard-specific args below
-)
-/root/miniconda3/envs/rl_car/bin/python -u "$TRAIN_PY" "${ARGS[@]}" 2>&1 | tee -a "$LOG_FILE"
-echo "==== Stage $STAGE finished | $(date) ====\n" | tee -a "$LOG_FILE"
-# Set prev_model_path to latest .zip inside this stage dir (fallback to dir if none)
-latest_zip=$(ls -1t "$STAGE_DIR"/*.zip 2>/dev/null | head -n 1 || true)
-if [[ -z "${latest_zip:-}" ]]; then
-  echo "WARNING: No .zip model found in $STAGE_DIR; using directory as prev_model_path"
-  prev_model_path="$STAGE_DIR"
-else
-  echo "Found previous model: $latest_zip"
-  prev_model_path="$latest_zip"
-fi
-
-# ---------- Stage: end ----------
+# ----------四个障碍物 ----------
 STAGE=end
-STAGE_DIR="$BASE_MODEL_DIR/${STAGE}_${train_id}"
+remark="env2"
+WORLD_PATH="/root/workspace/RL_car2/warehouse/worlds/vertical/warehouse5_env2.wbt"
+STAGE_DIR="$BASE_MODEL_DIR/${remark}_${train_id}"
 mkdir -p "$STAGE_DIR"
 LOG_FILE="$STAGE_DIR/train.log"
-total_steps=500000
+total_steps=100000
 echo "\n==== Training stage: $STAGE | $(date) ====" | tee -a "$LOG_FILE"
 ARGS=(
   --total_steps "$total_steps"
-  --models_dir "$STAGE_DIR"
+  --model_dir "$STAGE_DIR"
   --curriculum_stage "$STAGE"
-  --prev_model_path "$prev_model_path"
+  --pretrained_model_path "$prev_model_path"
   --remark "$remark"
   --experiment_name "$experiment_name"
-  # add more end-specific args below
+  --world_1 "$WORLD_PATH"
 )
 /root/miniconda3/envs/rl_car/bin/python -u "$TRAIN_PY" "${ARGS[@]}" 2>&1 | tee -a "$LOG_FILE"
 echo "==== Stage $STAGE finished | $(date) ====\n" | tee -a "$LOG_FILE"
@@ -197,6 +75,162 @@ echo "==== Stage $STAGE finished | $(date) ====\n" | tee -a "$LOG_FILE"
 latest_zip=$(ls -1t "$STAGE_DIR"/*.zip 2>/dev/null | head -n 1 || true)
 if [[ -z "${latest_zip:-}" ]]; then
   echo "WARNING: No .zip model found in $STAGE_DIR; using directory as prev_model_path"
+  prev_model_path="$STAGE_DIR"
+else
+  echo "Found previous model: $latest_zip"
+  prev_model_path="$latest_zip"
+fi
+
+
+# ---------- 六个障碍物 ----------
+STAGE=end
+remark="env3"
+WORLD_PATH="/root/workspace/RL_car2/warehouse/worlds/vertical/warehouse5_env3.wbt"
+STAGE_DIR="$BASE_MODEL_DIR/${remark}_${train_id}"
+mkdir -p "$STAGE_DIR"
+LOG_FILE="$STAGE_DIR/train.log"
+total_steps=100000
+echo "\n==== Training stage: $STAGE | $(date) ====" | tee -a "$LOG_FILE"
+ARGS=(
+  --total_steps "$total_steps"
+  --model_dir "$STAGE_DIR"
+  --curriculum_stage "$STAGE"
+  --pretrained_model_path "$prev_model_path"
+  --remark "$remark"
+  --experiment_name "$experiment_name"
+  --world_1 "$WORLD_PATH"
+)
+/root/miniconda3/envs/rl_car/bin/python -u "$TRAIN_PY" "${ARGS[@]}" 2>&1 | tee -a "$LOG_FILE"
+echo "==== Stage $STAGE finished | $(date) ====\n" | tee -a "$LOG_FILE"
+# Set prev_model_path to latest .zip inside this stage dir (fallback to dir if none)
+latest_zip=$(ls -1t "$STAGE_DIR"/*.zip 2>/dev/null | head -n 1 || true)
+if [[ -z "${latest_zip:-}" ]]; then
+  echo "WARNING: No .zip model found in $STAGE_DIR; using directory as prev_model_path"
+  prev_model_path="$STAGE_DIR"
+else
+  echo "Found previous model: $latest_zip"
+  prev_model_path="$latest_zip"
+fi
+
+
+# ---------- 八个障碍物 ----------
+STAGE=end
+remark="env4"
+WORLD_PATH="/root/workspace/RL_car2/warehouse/worlds/vertical/warehouse5_env4.wbt"
+STAGE_DIR="$BASE_MODEL_DIR/${remark}_${train_id}"
+mkdir -p "$STAGE_DIR"
+LOG_FILE="$STAGE_DIR/train.log"
+total_steps=120000
+echo "\n==== Training stage: $STAGE | $(date) ====" | tee -a "$LOG_FILE"
+ARGS=(
+  --total_steps "$total_steps"
+  --model_dir "$STAGE_DIR"
+  --curriculum_stage "$STAGE"
+  --pretrained_model_path "$prev_model_path"
+  --remark "$remark"
+  --experiment_name "$experiment_name"
+  --world_1 "$WORLD_PATH"
+)
+/root/miniconda3/envs/rl_car/bin/python -u "$TRAIN_PY" "${ARGS[@]}" 2>&1 | tee -a "$LOG_FILE"
+echo "==== Stage $STAGE finished | $(date) ====\n" | tee -a "$LOG_FILE"
+# Set prev_model_path to latest .zip inside this stage dir (fallback to dir if none)
+latest_zip=$(ls -1t "$STAGE_DIR"/*.zip 2>/dev/null | head -n 1 || true)
+if [[ -z "${latest_zip:-}" ]]; then
+  echo "WARNING: No .zip model found in $STAGE_DIR; using directory as prev_model_path"
+  prev_model_path="$STAGE_DIR"
+else
+  echo "Found previous model: $latest_zip"
+  prev_model_path="$latest_zip"
+fi
+
+
+# ---------- 十个障碍物 ----------
+STAGE=end
+remark="env5"
+WORLD_PATH="/root/workspace/RL_car2/warehouse/worlds/vertical/warehouse5_env5.wbt"
+STAGE_DIR="$BASE_MODEL_DIR/${remark}_${train_id}"
+mkdir -p "$STAGE_DIR"
+LOG_FILE="$STAGE_DIR/train.log"
+total_steps=150000
+echo "\n==== Training stage: $STAGE | $(date) ====" | tee -a "$LOG_FILE"
+ARGS=(
+  --total_steps "$total_steps"
+  --model_dir "$STAGE_DIR"
+  --curriculum_stage "$STAGE"
+  --pretrained_model_path "$prev_model_path"
+  --remark "$remark"
+  --experiment_name "$experiment_name"
+  --world_1 "$WORLD_PATH"
+)
+/root/miniconda3/envs/rl_car/bin/python -u "$TRAIN_PY" "${ARGS[@]}" 2>&1 | tee -a "$LOG_FILE"
+echo "==== Stage $STAGE finished | $(date) ====\n" | tee -a "$LOG_FILE"
+# Set prev_model_path to latest .zip inside this stage dir (fallback to dir if none)
+latest_zip=$(ls -1t "$STAGE_DIR"/*.zip 2>/dev/null | head -n 1 || true)
+if [[ -z "${latest_zip:-}" ]]; then
+  echo "WARNING: No .zip model found in $STAGE_DIR; using directory as prev_model_path"
+  prev_model_path="$STAGE_DIR"
+else
+  echo "Found previous model: $latest_zip"
+  prev_model_path="$latest_zip"
+fi
+
+
+# ---------- 12个障碍物 ----------
+STAGE=end
+remark="env6"
+WORLD_PATH="/root/workspace/RL_car2/warehouse/worlds/vertical/warehouse5_env6.wbt"
+STAGE_DIR="$BASE_MODEL_DIR/${remark}_${train_id}"
+mkdir -p "$STAGE_DIR"
+LOG_FILE="$STAGE_DIR/train.log"
+total_steps=170000
+echo "\n==== Training stage: $STAGE | $(date) ====" | tee -a "$LOG_FILE"
+ARGS=(
+  --total_steps "$total_steps"
+  --model_dir "$STAGE_DIR"
+  --curriculum_stage "$STAGE"
+  --pretrained_model_path "$prev_model_path"
+  --remark "$remark"
+  --experiment_name "$experiment_name"
+  --world_1 "$WORLD_PATH"
+)
+/root/miniconda3/envs/rl_car/bin/python -u "$TRAIN_PY" "${ARGS[@]}" 2>&1 | tee -a "$LOG_FILE"
+echo "==== Stage $STAGE finished | $(date) ====\n" | tee -a "$LOG_FILE"
+# Set prev_model_path to latest .zip inside this stage dir (fallback to dir if none)
+latest_zip=$(ls -1t "$STAGE_DIR"/*.zip 2>/dev/null | head -n 1 || true)
+if [[ -z "${latest_zip:-}" ]]; then
+  echo "WARNING: No .zip model found in $STAGE_DIR; using directory as prev_model_path"
+  prev_model_path="$STAGE_DIR"
+else
+  echo "Found previous model: $latest_zip"
+  prev_model_path="$latest_zip"
+fi
+
+
+
+# ---------- 13个障碍物 ----------
+STAGE=end
+remark="env_end"
+WORLD_PATH="/root/workspace/RL_car2/warehouse/worlds/vertical/warehouse5_env_end1.wbt"
+STAGE_DIR="$BASE_MODEL_DIR/${remark}_${train_id}"
+mkdir -p "$STAGE_DIR"
+LOG_FILE="$STAGE_DIR/train.log"
+total_steps=200000
+echo "\n==== Training stage: $STAGE | $(date) ====" | tee -a "$LOG_FILE"
+ARGS=(
+  --total_steps "$total_steps"
+  --model_dir "$STAGE_DIR"
+  --curriculum_stage "$STAGE"
+  --pretrained_model_path "$prev_model_path"
+  --remark "$remark"
+  --experiment_name "$experiment_name"
+  --world_1 "$WORLD_PATH"
+)
+/root/miniconda3/envs/rl_car/bin/python -u "$TRAIN_PY" "${ARGS[@]}" 2>&1 | tee -a "$LOG_FILE"
+echo "==== Stage $STAGE finished | $(date) ====\n" | tee -a "$LOG_FILE"
+# Set prev_model_path to latest .zip inside this stage dir (fallback to dir if none)
+latest_zip=$(ls -1t "$STAGE_DIR"/*.zip 2>/dev/null | head -n 1 || true)
+if [[ -z "${latest_zip:-}" ]]; then
+  echo "WARNING: No .zip modStage: hard2el found in $STAGE_DIR; using directory as prev_model_path"
   prev_model_path="$STAGE_DIR"
 else
   echo "Found previous model: $latest_zip"

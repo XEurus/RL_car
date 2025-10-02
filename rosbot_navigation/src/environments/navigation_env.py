@@ -193,6 +193,7 @@ class ROSbotNavigationEnv(gym.Env):
                   action_mode: str = 'wheels',
                   obs_mode: str = 'local_map',
                   debug: bool = False,
+                  training_mode: str = 'vertical_curriculum',
                   **kwargs):
         # 货物类型
         self.cargo_type = cargo_type
@@ -201,7 +202,7 @@ class ROSbotNavigationEnv(gym.Env):
         self.control_period_ms = int(control_period_ms) if control_period_ms and control_period_ms > 0 else 200
         # 调试模式
         self.debug = bool(debug)
-        
+        self.training_mode = str(training_mode)
         # 启用初始朝向目标
         self._rotate_to_target_on_reset = True
         
@@ -693,14 +694,14 @@ class ROSbotNavigationEnv(gym.Env):
     
     def _set_navigation_task(self):
         """设置导航任务（集成课程学习阶段）"""
-        try:
+        if self.training_mode == 'horizontal_curriculum':
             start_pos, target_pos, angle_mode = self.nav_utils.get_curriculum_task()
             # 保存角度模式以便 reset 时设置朝向
             self._angle_mode_on_reset = angle_mode
             # 每次根据课程阶段应用对应训练参数
             self._apply_curriculum_params()
-        except Exception:
-            # 回退到旧逻辑
+
+        elif self.training_mode == 'vertical_curriculum':
             start_pos, target_pos = self.nav_utils.get_navigation_task(self.cargo_type)
             self._angle_mode_on_reset = 'axis'
         
@@ -756,7 +757,7 @@ class ROSbotNavigationEnv(gym.Env):
 
             # 加入20%-30%的扰动
             yaw_range = math.pi/2  # 每个方向覆盖π/2弧度
-            perturb_ratio = random.uniform(0.1, 0.2)
+            perturb_ratio = random.uniform(0.0, 0.0)
             perturb = (yaw_range * perturb_ratio) * random.choice([-1, 1])
             simplified_yaw += perturb
             simplified_yaw = math.atan2(math.sin(simplified_yaw), math.cos(simplified_yaw))
@@ -1654,7 +1655,9 @@ class ROSbotNavigationEnv(gym.Env):
     def close(self):
         """释放资源并尽量优雅地停止控制器"""
         try:
+            print("关闭环境...")
             if hasattr(self, 'supervisor') and self.supervisor and hasattr(self.supervisor, 'simulationSetMode') and hasattr(Supervisor, 'SIMULATION_MODE_PAUSE'):
                 self.supervisor.simulationSetMode(Supervisor.SIMULATION_MODE_PAUSE)
+            print("环境关闭完成")
         except Exception:
             pass
