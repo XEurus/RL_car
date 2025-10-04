@@ -146,8 +146,7 @@ class RewardFunctions:
                     self.consecutive_stuck_steps = 0
             self.previous_position = current_position.copy()
             
-            # 设置终止标志
-            env_state['terminate'] = collision_terminate or stuck_terminate
+
 
             # 3) 渐进式到达目标奖励，增加停车奖励
             DIST_THRESHOLD = env_state['success_threshold']
@@ -169,23 +168,31 @@ class RewardFunctions:
                 angular_vel_signed = 0.0
             lw, rw = env_state.get('get_last_wheel_speeds', lambda: (None, None))()
 
+            # 3) 渐进式到达目标奖励，强制要求停车
+            goal_reached = False
             if distance < DIST_THRESHOLD:
-                rewards['goal_reward'] = 2000.0
+                # 到达目标区域：必须停车才能获得完整奖励
+                stop_bonus = (1.0 - min(1.0, linear_vel + angular_vel)) * 10
+                base_goal_reward = 1000.0
+                # 如果速度足够小（接近停车），给予巨大奖励并终止
+                if (linear_vel < 0.1 and angular_vel < 0.1):
+                    rewards['goal_reward'] = base_goal_reward + stop_bonus * getattr(args, 'stop_bonus_k', 100.0)
+                    goal_reached = True  # 成功到达且停车，设置终止标志
+                else:
+                    # 在目标区域但未停车：只给部分奖励，鼓励停车
+                    rewards['goal_reward'] = base_goal_reward * 0.6 + stop_bonus * getattr(args, 'stop_bonus_k', 60.0)
+                    goal_reached = True
+                    # 在目标附近打转给予惩罚
+            elif distance < 1:  # 50cm内
+                if angular_vel > 0.1:
+                    rewards['goal_spin_penalty'] = -50.0 * angular_vel *(1/distance) 
+                slow_down_reward = (1.0 - (linear_vel+angular_vel)) * 10
+                rewards['slow_down_reward'] = slow_down_reward * getattr(args, 'slow_down_reward_k', 5.0)
+                approach_reward = (1.0 - distance) * 10  # 接近奖励
+                rewards['approach_goal'] = approach_reward * getattr(args, 'approach_reward_k', 5.0)
 
-            # if distance < DIST_THRESHOLD:
-            #     # 增加停车奖励：速度越小，奖励越大
-            #     stop_bonus = (1.0 - min(1.0, linear_vel + angular_vel))*10
-            #     rewards['goal_reward'] = 1000.0 + stop_bonus*args.stop_bonus_k  # 完全到达 + 停车奖励
-            # elif distance < 0.5:  # 50cm内
-            #     close_reward = (0.5 - distance)*20 # 线性递增奖励
-            #     # 在接近目标时，鼓励减速
-            #     if distance < 0.3:  # 30cm内开始鼓励减速
-            #         slow_down_reward = (1.0 - min(1.0, linear_vel))*10 
-            #         rewards['slow_down_reward'] = slow_down_reward*args.slow_down_reward_k
-            #     rewards['approach_goal'] = close_reward*args.approach_reward_k
-            # elif distance < 1.0:  # 1m内  
-            #     approach_reward = (1.0 - distance)*10 # 接近奖励
-            #     rewards['approach_goal'] = approach_reward*args.approach_reward_k
+            # 设置终止标志（碰撞、卡住、成功到达且停车）
+            env_state['terminate'] = collision_terminate or stuck_terminate or goal_reached
 
             # 4) 时间惩罚（随步数递增）
             time_penalty = 1 + (float(env_state['episode_steps']))
@@ -196,17 +203,24 @@ class RewardFunctions:
             if liner_distance_reward == 0:
                 dist_reward = min(125.0, ((-1)*distance+125) if distance > 1e-6 else 125)
             elif liner_distance_reward == 1:
-                dist_reward = (-0.5)*(distance)*(distance)+50
+                dist_reward = (-0.3)*(distance)*(distance)+50
             elif liner_distance_reward == 2:
                 dist_reward = 4/(distance+1)*50
-            rewards['distance_reward'] = dist_reward*args.distance_k
 
             # 6) 距离变化（靠近奖励）
             prev_d = self.prev_distance_to_target if self.prev_distance_to_target is not None else distance
             dist_change = prev_d - distance
-            rewards['distance_change_reward'] = dist_change*args.delta_distance_k*((distance+1)/4)
+            if dist_change < 0 and distance<3:
+                rewards['distance_change_reward'] = dist_change*args.delta_distance_k
+            else:
+                rewards['distance_change_reward'] = dist_change*args.delta_distance_k*((distance+1)/4)
             # print(f"Distance change reward: {rewards['distance_change_reward']}")
-
+            
+            if dist_change >0:
+                rewards['distance_reward'] = dist_reward*args.distance_k
+            else:
+                rewards['distance_reward'] = dist_reward*args.distance_k*0.5
+            
             # 7) 探索奖励（新位置）
             current_pos = env_state['get_sup_position']()
             robot_position = (float(current_pos[0]), float(current_pos[1]))
@@ -336,7 +350,7 @@ class RewardFunctions:
             # clear_path_to_target = float(lidar_features[target_angle_index]) > 0.3
 
             # 判断“前方是否有路”：检查正前方附近的一小段扇区
-            center_idx = int((0.5) * num_feats)  # angle=0 对应正前方
+            center_idx = int((0.5) * num_feats)
             half_width = 3
             start_idx = int(center_idx - half_width)
             end_idx = int(center_idx + half_width)
@@ -344,7 +358,7 @@ class RewardFunctions:
             front_clear = front_max > 0.4
             front_sum = sum(float(lidar_features[i]) for i in range(start_idx, end_idx + 1))
             if front_clear:
-                rewards['front_clear'] = front_sum*0.1*args.front_clear_k
+                rewards['front_clear'] = front_sum*0.1*args.front_clear_k*(((-1)*(distance-6)**2*0.1+4))
             else:
                 rewards['front_clear'] = 0.0
 
@@ -391,14 +405,28 @@ class RewardFunctions:
                     # 计算方向差异
                     angle_diff = abs((target_angle - movement_angle + math.pi) % (2*math.pi) - math.pi)
                     # 角度差越小，奖励越大（从1.0到0）
-                    alignment = max(0, 1.0 - angle_diff/math.pi)
+                    if distance > 8:
+                        alignment = 1.0 - angle_diff/(((-0.017)*(distance-8)**2+0.8)*math.pi)
+                    elif 8> distance > 3:
+                        alignment = 1.0 - angle_diff/(((-0.01)*(distance-5.5)**2+1)*math.pi)
+                    elif distance < 3:
+                        alignment = 1.0 - angle_diff/(((-0.017)*(distance-6)**2+0.8)*math.pi)
+
                     # 奖励 = 对齐度 × 移动距离 × 系数 X 转圈衰减 X 距离目标加成
-                    directional_reward = alignment * dist_change * getattr(args, 'directional_movement_k', 15.0)*(4/(self.turn_steps+1))*((distance-6)*(distance-6)*0.2+1)
+                    if alignment < 0:
+                        directional_reward = alignment * abs(dist_change) * getattr(args, 'directional_movement_k', 15.0)*((distance-6)*(distance-6)*0.2+1)
+                    else:
+                        directional_reward = alignment * dist_change * getattr(args, 'directional_movement_k', 15.0)*((distance-6)*(distance-6)*0.2+1)
                 except Exception as e:
                     print(f"Error in directional movement reward calculation: {e}")
                     directional_reward = 0.0
             rewards['directional_movement'] = directional_reward
 
+            # # 14) 角速度惩罚
+            # angular_velocity_penalty = 0.0
+            # if angular_vel > 0.3 and distance < 3:
+            #     angular_velocity_penalty = angular_vel * getattr(args, 'angular_velocity_penalty_k', 10)
+            # rewards['angular_velocity_penalty'] = angular_velocity_penalty
             # === 调试输出：左右轮速度、目标角度与距离 ===
             try:
                 dbg = bool(getattr(args, 'debug', False))
@@ -462,7 +490,6 @@ class RewardFunctions:
             # same_spot_penalty: {rewards['same_spot_penalty']},\n
             return scaled_reward
     
-    
     def _calculate_angle_to_target(self, env_state: Dict[str, Any]) -> float:
         """
         计算当前航向与目标方向的角度偏差（-π, π）
@@ -518,8 +545,6 @@ class RewardFunctions:
         reward = 0.0
         
         # 稳定性奖励 - 惩罚大加速度（从env_state获取，加速度不再从obs索引）
-        # 注意：此函数在calculate_reward内部调用时，需要从env_state读取；
-        # 这里简化为0并在calculate_reward处处理主要奖励。
         linear_acc = 0.0
         angular_acc = 0.0
         stability_penalty = -abs(linear_acc) * 5.0 - abs(angular_acc) * 3.0

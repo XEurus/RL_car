@@ -175,7 +175,7 @@ class NavigationUtils:
         self.use_random_targets = False
         # 根据任务阶段选择起点和终点
         if cargo_type == 'normal':
-            if random.random() < 0.7:
+            if random.random() < 0.6:
                 # 从起点到各个货物点
                 if self.use_random_targets:
                     start_pos = self._generate_random_position_in_area('start_area')

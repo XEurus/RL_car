@@ -264,6 +264,7 @@ class EnhancedTrainingCallback(BaseCallback):
                  plot_vmax: float = 0.5,
                  step_avg_window: int = 100,
                  display_plot: bool = False,
+                 enable_obstacle_curriculum: bool = False,
                  verbose: int = 0):
         super().__init__(verbose)
         self.env = env
@@ -273,6 +274,7 @@ class EnhancedTrainingCallback(BaseCallback):
         except Exception:
             self.base_env = env
         self.log_interval = log_interval
+        self.enable_obstacle_curriculum = enable_obstacle_curriculum
         self.save_root = save_root
         self.draw_trajectory = draw_trajectory
         self.show_ui = show_ui
@@ -307,7 +309,24 @@ class EnhancedTrainingCallback(BaseCallback):
         self.total_episodes = 0
         self.total_successes = 0
         
+        # 接近率统计（终点在目标2米范围内）
+        self.recent_approach_window = deque(maxlen=100)  # 最近100个episode的接近情况
+        self.total_approaches = 0
+        
     def _on_step(self) -> bool:
+        # 更新环境的全局训练步数（用于渐进式障碍物课程）
+        if self.enable_obstacle_curriculum:
+            # 优先使用 base_env（绕过 Monitor 等包装器）
+            target_env = self.base_env
+            if hasattr(target_env, 'update_global_training_step'):
+                target_env.update_global_training_step(self.num_timesteps)
+            elif hasattr(self.env, 'envs') and len(self.env.envs) > 0:
+                # VecEnv 包装的情况
+                base_env = self.env.envs[0]
+                if hasattr(base_env, 'update_global_training_step'):
+                    base_env.update_global_training_step(self.num_timesteps)
+
+        
         # 获取当前步的奖励和信息
         reward = self.locals.get('rewards', [0])[0]
         info = self.locals.get('infos', [{}])[0]
@@ -355,6 +374,13 @@ class EnhancedTrainingCallback(BaseCallback):
             self.recent_success_window.append(episode_success)
             if episode_success:
                 self.total_successes += 1
+            
+            # 判断是否接近目标（终点在目标2米范围内）
+            final_distance = info.get('distance_to_target', float('inf'))
+            episode_approach = final_distance < 2.0  # 2米阈值
+            self.recent_approach_window.append(episode_approach)
+            if episode_approach:
+                self.total_approaches += 1
             
             # 记录episode指标
             self.episode_rewards.append(self.current_episode_reward)
@@ -411,9 +437,11 @@ class EnhancedTrainingCallback(BaseCallback):
 
         # 定期记录平均指标（合并写入，降低MLflow写频率）
         if self.num_timesteps % self.log_interval == 0:
-            # 计算成功率
+            # 计算成功率和接近率
             success_rate_recent = sum(self.recent_success_window) / len(self.recent_success_window) if len(self.recent_success_window) > 0 else 0.0
+            approach_rate_recent = sum(self.recent_approach_window) / len(self.recent_approach_window) if len(self.recent_approach_window) > 0 else 0.0
             #success_rate_total = self.total_successes / self.total_episodes if self.total_episodes > 0 else 0.0
+            #approach_rate_total = self.total_approaches / self.total_episodes if self.total_episodes > 0 else 0.0
             avg_step_reward = float(np.mean(self.step_reward_window)) if len(self.step_reward_window) > 0 else 0.0
             # 回合统计滑动平均（最近100个回合）
             avg_reward = float(np.mean(self.episode_rewards[-100:])) if len(self.episode_rewards) > 0 else 0.0
@@ -441,6 +469,7 @@ class EnhancedTrainingCallback(BaseCallback):
                     "avg_reward_1000": avg_step_reward,
                     "avg_episode_length_100": float(self.current_episode_length),
                     "success_rate_recent_100": float(success_rate_recent),
+                    "approach_rate_recent_100": float(approach_rate_recent),
                 }, step=self.num_timesteps)
 
             if self.verbose > 0:
@@ -452,7 +481,9 @@ class EnhancedTrainingCallback(BaseCallback):
                     print(f"  平均奖励(最近100): {avg_reward:.2f}")
                     print(f"  平均长度(最近100): {avg_length:.1f}")
                     print(f"  成功率(最近100): {success_rate_recent*100:.1f}%")
+                    print(f"  接近率(最近100,<2m): {approach_rate_recent*100:.1f}%")
                     print(f"  成功率(总体): {(self.total_successes/self.total_episodes*100) if self.total_episodes > 0 else 0:.1f}%")
+                    print(f"  接近率(总体,<2m): {(self.total_approaches/self.total_episodes*100) if self.total_episodes > 0 else 0:.1f}%")
                 print(f"{'='*80}\n")
         
         return True
@@ -526,6 +557,7 @@ def train_single_cargo_model(
         macro_action_steps=args.macro_action_steps if args else 1,
         enable_speed_smoothing=args.enable_speed_smoothing if args else False,
         training_mode=args.training_mode if args else 'vertical_curriculum',
+        enable_obstacle_randomization=args.enable_obstacle_curriculum if args and hasattr(args, 'enable_obstacle_curriculum') else True,
     )
     
     # 设置args属性，供奖励函数使用
@@ -637,24 +669,70 @@ def train_single_cargo_model(
     # 7. 设置MLflow（如果需要）
     if args and hasattr(args, 'experiment_name') and args.experiment_name:
         mlflow.set_experiment(args.experiment_name)
-        mlflow.start_run(run_name=f"single_{args.remark}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        mlflow.start_run(run_name=f"single_{args.leaner_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        
+        # 设置运行描述
+        if args and hasattr(args, 'remark') and args.remark:
+            mlflow.set_tag("mlflow.note.content", args.remark)
         
         # 记录参数
-        mlflow.log_params({
-            'cargo_type': cargo_type,
-            'total_steps': total_steps,
-            'learning_rate': learning_rate,
-            'buffer_size': buffer_size,
-            'batch_size': batch_size,
-            'gamma': gamma,
-            'obs_mode': obs_mode,
-            'action_mode': args.action_mode if args else 'wheels',
-            'policy_type': policy_type,
-            'device': device,
-            'model_save_path': model_save_path,
-            'step_avg_window': (args.step_avg_window if args and hasattr(args, 'step_avg_window') else 100)
-        })
+        # 记录所有args参数到MLflow
+        try:
+            if args:
+                # 获取所有参数的字典
+                all_params = vars(args).copy()
+                # 添加额外的运行时参数
+                all_params.update({
+                    'policy_type': policy_type,
+                    'model_save_path': str(model_save_path),
+                })
+                # 过滤掉None值和过长的字符串（MLflow有长度限制）
+                filtered_params = {}
+                for key, value in all_params.items():
+                    if value is not None:
+                        # 转换为字符串并限制长度
+                        str_value = str(value)
+                        if len(str_value) > 250:
+                            str_value = str_value[:247] + '...'
+                        filtered_params[key] = str_value
+                mlflow.log_params(filtered_params)
+        except Exception as e:
+            print(f"[WARN] 记录args参数到MLflow失败: {e}")
+            # 兜底：只记录核心参数
+            mlflow.log_params({
+                'cargo_type': cargo_type,
+                'total_steps': total_steps,
+                'learning_rate': learning_rate,
+                'buffer_size': buffer_size,
+                'batch_size': batch_size,
+                'gamma': gamma,
+                'obs_mode': obs_mode,
+                'action_mode': args.action_mode if args else 'wheels',
+                'policy_type': policy_type,
+                'device': device,
+                'model_save_path': model_save_path,
+                'step_avg_window': (args.step_avg_window if args and hasattr(args, 'step_avg_window') else 100)
+            })
         print("MLflow运行已启动")
+        
+        # 记录代码到MLflow（便于实验追溯）
+        try:
+            # 1. 记录当前运行的训练脚本
+            current_script = Path(__file__)
+            if current_script.exists():
+                mlflow.log_artifact(str(current_script), artifact_path='code')
+                print(f"✓ 已记录训练脚本: {current_script.name}")
+            
+            # 2. 记录整个src目录
+            src_dir = Path(__file__).parent / 'src'
+            if src_dir.exists() and src_dir.is_dir():
+                mlflow.log_artifacts(str(src_dir), artifact_path='code/src')
+                print(f"✓ 已记录整个src目录: {src_dir}")
+            else:
+                print(f"[WARN] src目录不存在: {src_dir}")
+                
+        except Exception as e:
+            print(f"[WARN] 记录代码文件失败: {e}")
     
     # 8. 创建增强的训练回调（包含成功率统计和轨迹可视化）
     callbacks = []
@@ -668,7 +746,8 @@ def train_single_cargo_model(
         step_avg_window=(args.step_avg_window if args and hasattr(args, 'step_avg_window') else 100),
         verbose=args.verbose if args and hasattr(args, 'verbose') else 1,
         draw_trajectory=args.draw_trajectory if args and hasattr(args, 'draw_trajectory') else False,
-        display_plot=args.display_plot if args and hasattr(args, 'display_plot') else False
+        display_plot=args.display_plot if args and hasattr(args, 'display_plot') else False,
+        enable_obstacle_curriculum=args.enable_obstacle_curriculum if args and hasattr(args, 'enable_obstacle_curriculum') else False
     )
     callbacks.append(enhanced_callback)
     
@@ -731,24 +810,28 @@ def main():
     parser.add_argument('--tensorboard_log', type=str, default='./logs', help='TensorBoard日志目录')
     parser.add_argument('--experiment_name', type=str, default='Mamul_Single_Vertical', help='MLflow实验名称')
     parser.add_argument('--model_dir', type=str, 
-                        default=f'/root/workspace/RL_car2/rosbot_navigation/results/Mamul_Single_Vertical/env2_test_{now}', 
+                        default=f'/root/workspace/RL_car2/rosbot_navigation/results/Mamul_Single_Vertical/env_test4.6.3_end_env3_{now}', 
                         help='模型保存目录')
-    parser.add_argument('--remark', type=str, default='Env2_test', help='leaner名称')
+    parser.add_argument('--leaner_name', type=str, default='Env_test4.6.3_end_env3', help='leaner名称')
+    parser.add_argument('--remark', type=str, default='基于4.6.3.0版本，使用最终环境，尝试训练一步到位', help='remark')
 
     parser.add_argument('--pretrained_model_path', type=str, 
-                        default='/root/workspace/RL_car2/rosbot_navigation/results/Mamul_Single_Vertical/env1_test/td3_Env1_test_normal_80000.zip', 
+                        default='', 
                         help='预训练模型路径(.zip)，若提供则在其基础上继续训练')
                         
     parser.add_argument('--world_1', type=str, 
-                        default='/root/workspace/RL_car2/warehouse/worlds/vertical/warehouse5_env2.wbt', 
+                        default='/root/workspace/RL_car2/warehouse/worlds/vertical/warehouse5_env1.wbt', 
                         help='Webots world文件路径')
     parser.add_argument('--training_mode', type=str, 
                         default='vertical_curriculum', 
                         help='训练模式')
+    # 可视化参数
+    parser.add_argument('--plot_vmin', type=float, default=-150, help='轨迹图奖励最小值')
+    parser.add_argument('--plot_vmax', type=float, default=150, help='轨迹图奖励最大值')
 
     # 基本参数
     parser.add_argument('--cargo_type', type=str, default='normal', choices=['normal', 'fragile', 'dangerous'], help='货物类型')
-    parser.add_argument('--total_steps', type=int, default=80000, help='总训练步数')
+    parser.add_argument('--total_steps', type=int, default=200000, help='总训练步数')
     parser.add_argument('--device', type=str, default='cuda', help='计算设备')
     parser.add_argument('--seed', type=int, default=0, help='随机种子')
     
@@ -768,9 +851,9 @@ def main():
     parser.add_argument('--minimize', type=bool, default=True, help='最小化窗口')
     
     # UI参数
-    parser.add_argument('--show_ui', type=bool, default=True, help='显示UI')
+    parser.add_argument('--show_ui', type=bool, default=False, help='显示UI')
     parser.add_argument('--show_map', type=bool, default=False, help='显示地图')
-    parser.add_argument('--display_plot', type=bool, default=True, help='显示轨迹图')
+    parser.add_argument('--display_plot', type=bool, default=False, help='显示轨迹图')
     
     # TD3参数
     parser.add_argument('--learning_rate', type=float, default=3e-4, help='学习率')
@@ -793,32 +876,33 @@ def main():
     parser.add_argument('--step_avg_window', type=int, default=1000, help='单步奖励滑动平均窗口大小（步数）')
     parser.add_argument('--draw_trajectory', type=bool, default=True, help='绘制轨迹')
     
+    # 障碍物随机化参数
+    parser.add_argument('--enable_obstacle_curriculum', type=bool, default=False, help='启用渐进式障碍物课程学习（根据训练步数动态调整数量和位置）')
+    
     # 继续训练参数
     parser.add_argument('--reset_num_timesteps', type=bool, default=False, help='继续训练时是否重置时间步计数到0（默认False表示连续计数）')
     
-    # 可视化参数
-    parser.add_argument('--plot_vmin', type=float, default=-150, help='轨迹图奖励最小值')
-    parser.add_argument('--plot_vmax', type=float, default=150, help='轨迹图奖励最大值')
+
     
     # 课程学习参数（兼容性）
     parser.add_argument('--curriculum_stage', type=str, default='end', help='课程阶段')
     
 
     # 奖励系数参数
-    parser.add_argument('--delta_distance_k', type=float, default=50.0, help='距离变化奖励系数，以最大速度1.18m/s计，基础最大值约为0.7，线性')
+    parser.add_argument('--delta_distance_k', type=float, default=30.0, help='距离变化奖励系数，以最大速度1.18m/s计，基础最大值约为0.7，线性')
     parser.add_argument('--movement_reward_k', type=float, default=0.5, help='移动奖励系数，基础最大值为10，线性')
 
-    parser.add_argument('--liner_distance_reward', type=int, default=2,choices=[0, 1, 2], help='0:线性 1：负二次型 2：反比例')
-    parser.add_argument('--distance_k', type=float, default=0.5, help='基础距离奖励系数，基础最大值为50')
+    parser.add_argument('--liner_distance_reward', type=int, default=0,choices=[0, 1, 2], help='0:线性 1：负二次型 2：反比例')
+    parser.add_argument('--distance_k', type=float, default=0.4, help='基础距离奖励系数，基础最大值为50')
 
-    parser.add_argument('--time_k', type=float, default=0.02, help='时间惩罚系数，线性')   
+    parser.add_argument('--time_k', type=float, default=0.5, help='时间惩罚系数，线性')   
     parser.add_argument('--wall_proximity_penalty_k', type=float, default=5, help='墙壁接近惩罚系数，每条线最大0.8，一共二十线，基础最大值14，线性')
 
     parser.add_argument('--angle_reward_k', type=float, default=5, help='角度奖励系数，基础最大值为10，二次型')
     parser.add_argument('--angle_change_k', type=float, default=15.0, help='角度变化奖励,以单步最大角度变化1计，基础最大值1，线性')
-    parser.add_argument('--directional_movement_k', type=float, default=35.0, help='方向性移动奖励系数，鼓励朝目标方向移动而非随机移动')
+    parser.add_argument('--directional_movement_k', type=float, default=50.0, help='方向性移动奖励系数，鼓励朝目标方向移动而非随机移动')
     parser.add_argument('--early_spin_penalty_k', type=float, default=1.0, help='早期原地打转惩罚系数，负二次型')
-    parser.add_argument('--front_clear_k', type=float, default=3.0, help='前方有路奖励系数，基础最大值约为7，七条线求和，线性')
+    parser.add_argument('--front_clear_k', type=float, default=1.0, help='前方有路奖励系数，基础最大值约为7，七条线求和，线性')
     
     # 停用奖励
     parser.add_argument('--stop_bonus_k', type=float, default=0, help='停车奖励系数，基础最大值为10')   
@@ -834,7 +918,7 @@ def main():
         models_dir = Path(f"./models/single_train_{now}")
 
     models_dir.mkdir(parents=True, exist_ok=True)
-    model_path = models_dir / f"td3_{args.remark}_{args.cargo_type}_{args.total_steps}.zip"
+    model_path = models_dir / f"td3_{args.leaner_name}_{args.cargo_type}_{args.total_steps}.zip"
     
     print(f"\n开始单线程标准训练")
     print(f"模型保存路径: {model_path}")

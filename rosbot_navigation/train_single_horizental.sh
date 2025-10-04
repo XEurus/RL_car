@@ -23,7 +23,7 @@ experiment_name="Single-Vertical-7"
 # ---------- 无障碍物 ----------
 stage=end
 remark="env1"
-WORLD_PATH="/root/workspace/RL_car2/warehouse/worlds/vertical/warehouse5_env1.wbt"
+WORLD_PATH="/root/workspace/RL_car2/warehouse/worlds/warehouse5_end1.wbt"
 total_steps=60000
 STAGE_DIR="$BASE_MODEL_DIR/${remark}_${train_id}"
 mkdir -p "$STAGE_DIR"

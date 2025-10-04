@@ -383,6 +383,20 @@ class ROSbotNavigationEnv(gym.Env):
         
         # 奖励函数实例
         self.reward_functions = RewardFunctions()
+        
+        # 渐进式障碍物课程学习配置
+        self.enable_obstacle_randomization = kwargs.get('enable_obstacle_randomization', True)
+        self.obstacle_x_range = [-3.0, 3.0]  # x 范围
+        self.obstacle_y_range = [-3.5, 3.5]  # y 范围
+        self.obstacle_z_height = 0.3  # 障碍物高度（中心点）
+        self.max_obstacles = 14  # 最大障碍物数量
+        self.obstacle_curriculum_steps = [0, 50000,150000,300000,450000,600000,750000,900000,1050000]  # 每个阶段的步数
+        self.obstacle_curriculum_counts = [0,1,2,4,6,8,10,12,14]  # 对应的障碍物数量
+        # self.obstacle_curriculum_steps = [0, 1000,2000,3000,4000,5000,6000,7000,8000]  # 每个阶段的步数
+        # self.obstacle_curriculum_counts = [1,1,2,4,6,8,10,12,14]  # 对应的障碍物数量
+        self._global_training_step = 0  # 全局训练步数（由 train_single.py 更新）
+        self.obstacle_nodes = []  # 缓存障碍物节点
+        self._obstacle_safe_zones = []  # 安全区域（避免随机到这些区域）
 
     def _apply_curriculum_params(self):
         """根据课程学习阶段设置训练参数。
@@ -398,12 +412,12 @@ class ROSbotNavigationEnv(gym.Env):
         # (max_steps_per_episode, collision_threshold, success_threshold)
         params_by_stage = {
             'start':  (100, 0.05, 0.05),
-            'easy':   (200,  0.05, 0.25),
-            'medium': (230,  0.05, 0.25),
-            'hard':   (250,  0.05, 0.25),
-            'hard2':   (300,  0.05, 0.25),
-            'end':    (300,  0.05, 0.25),
-            'all':    (300,  0.05, 0.25),
+            'easy':   (120,  0.05, 0.25),
+            'medium': (140,  0.05, 0.25),
+            'hard':   (160,  0.05, 0.25),
+            'hard2':   (180,  0.05, 0.25),
+            'end':    (200,  0.05, 0.10),
+            'all':    (200,  0.05, 0.10),
         }
         max_steps, coll_th, succ_th = params_by_stage.get(stage, params_by_stage['end'])
         self.max_steps_per_episode = int(max_steps)
@@ -561,6 +575,10 @@ class ROSbotNavigationEnv(gym.Env):
         # 设置初始AMCL状态
         # self._initialize_amcl_state()
         
+        # 渐进式障碍物随机化（根据训练步数动态调整数量）
+        if self.enable_obstacle_randomization:
+            self._randomize_obstacles()
+        
         info = {
             'start_position': self.task_info['start_pos'].copy(),
             'target_position': self.task_info['target_pos'].copy(),
@@ -674,15 +692,32 @@ class ROSbotNavigationEnv(gym.Env):
     def _calculate_angle_to_target(self, target_pos):
         """
         计算带符号的相对偏航角（-π, π）：
-        定义为“车辆当前朝向射线”与“车辆指向目标的连线”之间的有向角度，
-        车辆正对目标时为0，左偏为正，右偏为负。
+        使用实际移动方向（而非机器人朝向）与目标方向的夹角。
+        如果机器人未移动，则回退到使用机器人朝向。
+        移动方向与目标方向一致时为0，左偏为正，右偏为负。
         """
         current_pos = self._get_sup_position()
-        current_orient = self._get_sup_orientation()
+        previous_pos = self.state_buffer.get('previous_position', current_pos)
+        
+        # 计算目标方向
         vec_to_target = target_pos - current_pos
         target_heading = math.atan2(float(vec_to_target[1]), float(vec_to_target[0]))
-        current_heading = float(current_orient[2])
-        angle = target_heading - current_heading
+        
+        # 计算实际移动方向
+        movement_vec = current_pos - previous_pos
+        movement_distance = float(np.linalg.norm(movement_vec[:2]))
+        
+        # 如果移动距离足够大，使用移动方向；否则使用机器人朝向
+        if movement_distance > 0.01:  # 1cm 阈值，避免噪声
+            movement_heading = math.atan2(float(movement_vec[1]), float(movement_vec[0]))
+            angle = target_heading - movement_heading
+        else:
+            # 回退：使用机器人朝向
+            current_orient = self._get_sup_orientation()
+            current_heading = float(current_orient[2])
+            angle = target_heading - current_heading
+        
+        # 归一化到 [-π, π]
         angle = (angle + math.pi) % (2 * math.pi) - math.pi
         # print(f"target_heading={target_heading}, current_heading={current_heading}, angle={angle}")
         return angle
@@ -710,6 +745,109 @@ class ROSbotNavigationEnv(gym.Env):
         
         # 重置机器人位置
         self._reset_robot_position(start_pos)
+    
+    def _randomize_obstacles(self):
+        """
+        渐进式障碍物随机化
+        - 根据全局训练步数决定障碍物数量（课程学习）
+        - 在指定范围内随机分布障碍物位置
+        - 避开起点、终点和机器人当前位置
+        """
+        try:
+            # 1. 根据训练步数确定障碍物数量（课程学习）
+            current_step = int(getattr(self, '_global_training_step', 0))
+            num_obstacles = 0
+            for i, step_threshold in enumerate(self.obstacle_curriculum_steps):
+                if current_step >= step_threshold:
+                    num_obstacles = self.obstacle_curriculum_counts[i]
+            
+            # 限制在最大值
+            num_obstacles = min(num_obstacles, self.max_obstacles)
+            
+            # 2. 初始化障碍物节点列表（仅第一次）
+            if not self.obstacle_nodes:
+                # 从场景中查找所有 WoodenBox
+                root = self.supervisor.getRoot()
+                children_field = root.getField('children')
+                num_children = children_field.getCount()
+                
+                for i in range(num_children):
+                    node = children_field.getMFNode(i)
+                    if node and node.getTypeName() == 'WoodenBox':
+                        self.obstacle_nodes.append(node)
+                
+                if self.obstacle_nodes:
+                    print(f"[Obstacle] 找到 {len(self.obstacle_nodes)} 个 WoodenBox 障碍物")
+                else:
+                    print(f"[Obstacle] 警告：未找到任何 WoodenBox 障碍物")
+                    return
+            
+            # 3. 定义安全区域（起点、终点周围）
+            safe_radius = 0.8  # 安全半径（米）
+            safe_zones = []
+            
+            # 起点安全区
+            if hasattr(self, 'task_info') and 'start_pos' in self.task_info:
+                start_pos = self.task_info['start_pos']
+                if start_pos is not None and len(start_pos) >= 2:
+                    safe_zones.append((float(start_pos[0]), float(start_pos[1]), safe_radius))
+            
+            # 终点安全区
+            if hasattr(self, 'task_info') and 'target_pos' in self.task_info:
+                target_pos = self.task_info['target_pos']
+                if target_pos is not None and len(target_pos) >= 2:
+                    safe_zones.append((float(target_pos[0]), float(target_pos[1]), safe_radius))
+            
+            # 4. 随机化障碍物位置
+            for idx, obstacle_node in enumerate(self.obstacle_nodes):
+                translation_field = obstacle_node.getField('translation')
+                if translation_field is None:
+                    continue
+                
+                if idx < num_obstacles:
+                    # 激活并随机化位置
+                    max_attempts = 50
+                    for attempt in range(max_attempts):
+                        # 生成随机位置
+                        x = random.uniform(self.obstacle_x_range[0], self.obstacle_x_range[1])
+                        y = random.uniform(self.obstacle_y_range[0], self.obstacle_y_range[1])
+                        
+                        # 检查是否在安全区内
+                        in_safe_zone = False
+                        for sx, sy, sr in safe_zones:
+                            dist = np.sqrt((x - sx)**2 + (y - sy)**2)
+                            if dist < sr:
+                                in_safe_zone = True
+                                break
+                        
+                        # 如果不在安全区，使用这个位置
+                        if not in_safe_zone:
+                            translation_field.setSFVec3f([x, y, self.obstacle_z_height])
+                            break
+                    else:
+                        # 如果多次尝试失败，使用最后一次生成的位置
+                        translation_field.setSFVec3f([x, y, self.obstacle_z_height])
+                else:
+                    # 移到场景外（禁用）
+                    translation_field.setSFVec3f([100.0, 100.0, 0.3])
+            
+            # 5. 输出调试信息
+            if self.debug or current_step % 10000 == 0:
+                print(f"[Obstacle] Step {current_step}: {num_obstacles}/{len(self.obstacle_nodes)} 个障碍物激活")
+        
+        except Exception as e:
+            print(f"[Obstacle] 随机化失败: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def update_global_training_step(self, step: int):
+        """
+        更新全局训练步数（由训练脚本调用）
+        
+        参数:
+            step: 当前全局训练步数
+        """
+        self._global_training_step = int(step)
     
     def _reset_robot_position(self, position):
         """重置机器人位置"""
