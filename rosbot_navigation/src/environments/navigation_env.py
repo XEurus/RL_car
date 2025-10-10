@@ -17,6 +17,7 @@ from pathlib import Path
 from ..utils.navigation_utils import NavigationUtils
 from ..utils.reward_functions import RewardFunctions
 from .local_map_obs import LocalMapObservation
+from . import navigation_env_obstacles as obstacles
 WEBOTS_AVAILABLE = True
 
 
@@ -345,6 +346,8 @@ class ROSbotNavigationEnv(gym.Env):
             'previous_orientation': np.zeros(3),
             'previous_time': 0.0
         }
+        # 最近一步的统计指标（用于info输出）
+        self._last_step_metrics = {}
         
         # 初始化AMCL结果
         self.amcl_result = {
@@ -385,18 +388,42 @@ class ROSbotNavigationEnv(gym.Env):
         self.reward_functions = RewardFunctions()
         
         # 渐进式障碍物课程学习配置
-        self.enable_obstacle_randomization = kwargs.get('enable_obstacle_randomization', True)
-        self.obstacle_x_range = [-3.0, 3.0]  # x 范围
-        self.obstacle_y_range = [-3.5, 3.5]  # y 范围
+        # enable_obstacle_curriculum 为首选开关；兼容旧参数 enable_obstacle_randomization
+        self.enable_obstacle_curriculum = bool(kwargs.get(
+            'enable_obstacle_curriculum',
+            kwargs.get('enable_obstacle_randomization', True)
+        ))
+        # 兼容旧代码：保持同名属性，值与新开关一致
+        self.enable_obstacle_randomization = self.enable_obstacle_curriculum
+        self.obstacle_x_range = [-3.0, 3.0]  # x 范围（用于旧的随机位置逻辑）
+        self.obstacle_y_range = [-3.5, 3.5]  # y 范围（用于旧的随机位置逻辑）
         self.obstacle_z_height = 0.3  # 障碍物高度（中心点）
         self.max_obstacles = 14  # 最大障碍物数量
-        self.obstacle_curriculum_steps = [0, 50000,150000,300000,450000,600000,750000,900000,1050000]  # 每个阶段的步数
-        self.obstacle_curriculum_counts = [0,1,2,4,6,8,10,12,14]  # 对应的障碍物数量
+#        self.obstacle_curriculum_steps = [0,10000,16000,22000,29000,37000,46000,56000,67000,79000]  # 每个阶段的步数
+#        self.obstacle_curriculum_counts = [4,5,6,7,8,9,10,11,12,13]  # 对应的障碍物数量
+        self.obstacle_curriculum_steps = [0,5000,8000,12000,17000,26000,34000,46000,55000,65000]  # 每个阶段的步数
+        self.obstacle_curriculum_counts = [4,5,6,7,8,9,10,11,12,13]  # 对应的障碍物数量
+        # self.obstacle_curriculum_steps = [0,5000,7000,9000,12000,16000,21000,27000,34000,42000]  # 每个阶段的步数
+        # self.obstacle_curriculum_counts = [4,5,6,7,8,9,10,11,12,13]  # 对应的障碍物数量
         # self.obstacle_curriculum_steps = [0, 1000,2000,3000,4000,5000,6000,7000,8000]  # 每个阶段的步数
         # self.obstacle_curriculum_counts = [1,1,2,4,6,8,10,12,14]  # 对应的障碍物数量
         self._global_training_step = 0  # 全局训练步数（由 train_single.py 更新）
         self.obstacle_nodes = []  # 缓存障碍物节点
         self._obstacle_safe_zones = []  # 安全区域（避免随机到这些区域）
+        
+        # 新增：预定义障碍物位置列表（从这些位置中随机选择）
+        self.use_predefined_positions = kwargs.get('use_predefined_positions', False)  # 是否使用预定义位置
+        self.fixed_obstacle_count = kwargs.get('fixed_obstacle_count', 5)  # 固定激活的障碍物数量（仅当禁用课程学习时使用）
+        # 新增：阶段锁定模式（每个课程阶段内障碍物集合不变；进入下一阶段在原有基础上新增一个）
+        self.lock_obstacles_per_stage = bool(kwargs.get('lock_obstacles_per_stage', False))
+        # 预定义位置：当use_predefined_positions=True时，会从 world 文件中自动读取 WoodenBox 的初始位置
+        # 下面是默认值（仅当world文件中没有WoodenBox时使用）
+        self.predefined_obstacle_positions = kwargs.get('predefined_obstacle_positions', [
+            # 14个预设位置（备用）
+            (-2.5, -2.0), (-1.5, -2.5), (-0.5, -2.0), (0.5, -2.5), (1.5, -2.0), (2.5, -2.5),  # 下方区域
+            (-2.5, 2.0), (-1.5, 2.5), (-0.5, 2.0), (0.5, 2.5), (1.5, 2.0), (2.5, 2.5),      # 上方区域
+            (-2.0, 0.0), (2.0, 0.0)  # 中间两侧
+        ])
 
     def _apply_curriculum_params(self):
         """根据课程学习阶段设置训练参数。
@@ -416,8 +443,8 @@ class ROSbotNavigationEnv(gym.Env):
             'medium': (140,  0.05, 0.25),
             'hard':   (160,  0.05, 0.25),
             'hard2':   (180,  0.05, 0.25),
-            'end':    (200,  0.05, 0.10),
-            'all':    (200,  0.05, 0.10),
+            'end':    (250,  0.05, 0.30),
+            'all':    (250,  0.05, 0.50),
         }
         max_steps, coll_th, succ_th = params_by_stage.get(stage, params_by_stage['end'])
         self.max_steps_per_episode = int(max_steps)
@@ -747,93 +774,9 @@ class ROSbotNavigationEnv(gym.Env):
         self._reset_robot_position(start_pos)
     
     def _randomize_obstacles(self):
-        """
-        渐进式障碍物随机化
-        - 根据全局训练步数决定障碍物数量（课程学习）
-        - 在指定范围内随机分布障碍物位置
-        - 避开起点、终点和机器人当前位置
-        """
+        """障碍物随机化：委托到 navigation_env_obstacles 模块实现。"""
         try:
-            # 1. 根据训练步数确定障碍物数量（课程学习）
-            current_step = int(getattr(self, '_global_training_step', 0))
-            num_obstacles = 0
-            for i, step_threshold in enumerate(self.obstacle_curriculum_steps):
-                if current_step >= step_threshold:
-                    num_obstacles = self.obstacle_curriculum_counts[i]
-            
-            # 限制在最大值
-            num_obstacles = min(num_obstacles, self.max_obstacles)
-            
-            # 2. 初始化障碍物节点列表（仅第一次）
-            if not self.obstacle_nodes:
-                # 从场景中查找所有 WoodenBox
-                root = self.supervisor.getRoot()
-                children_field = root.getField('children')
-                num_children = children_field.getCount()
-                
-                for i in range(num_children):
-                    node = children_field.getMFNode(i)
-                    if node and node.getTypeName() == 'WoodenBox':
-                        self.obstacle_nodes.append(node)
-                
-                if self.obstacle_nodes:
-                    print(f"[Obstacle] 找到 {len(self.obstacle_nodes)} 个 WoodenBox 障碍物")
-                else:
-                    print(f"[Obstacle] 警告：未找到任何 WoodenBox 障碍物")
-                    return
-            
-            # 3. 定义安全区域（起点、终点周围）
-            safe_radius = 0.8  # 安全半径（米）
-            safe_zones = []
-            
-            # 起点安全区
-            if hasattr(self, 'task_info') and 'start_pos' in self.task_info:
-                start_pos = self.task_info['start_pos']
-                if start_pos is not None and len(start_pos) >= 2:
-                    safe_zones.append((float(start_pos[0]), float(start_pos[1]), safe_radius))
-            
-            # 终点安全区
-            if hasattr(self, 'task_info') and 'target_pos' in self.task_info:
-                target_pos = self.task_info['target_pos']
-                if target_pos is not None and len(target_pos) >= 2:
-                    safe_zones.append((float(target_pos[0]), float(target_pos[1]), safe_radius))
-            
-            # 4. 随机化障碍物位置
-            for idx, obstacle_node in enumerate(self.obstacle_nodes):
-                translation_field = obstacle_node.getField('translation')
-                if translation_field is None:
-                    continue
-                
-                if idx < num_obstacles:
-                    # 激活并随机化位置
-                    max_attempts = 50
-                    for attempt in range(max_attempts):
-                        # 生成随机位置
-                        x = random.uniform(self.obstacle_x_range[0], self.obstacle_x_range[1])
-                        y = random.uniform(self.obstacle_y_range[0], self.obstacle_y_range[1])
-                        
-                        # 检查是否在安全区内
-                        in_safe_zone = False
-                        for sx, sy, sr in safe_zones:
-                            dist = np.sqrt((x - sx)**2 + (y - sy)**2)
-                            if dist < sr:
-                                in_safe_zone = True
-                                break
-                        
-                        # 如果不在安全区，使用这个位置
-                        if not in_safe_zone:
-                            translation_field.setSFVec3f([x, y, self.obstacle_z_height])
-                            break
-                    else:
-                        # 如果多次尝试失败，使用最后一次生成的位置
-                        translation_field.setSFVec3f([x, y, self.obstacle_z_height])
-                else:
-                    # 移到场景外（禁用）
-                    translation_field.setSFVec3f([100.0, 100.0, 0.3])
-            
-            # 5. 输出调试信息
-            if self.debug or current_step % 10000 == 0:
-                print(f"[Obstacle] Step {current_step}: {num_obstacles}/{len(self.obstacle_nodes)} 个障碍物激活")
+            obstacles._randomize_obstacles(self)
         
         except Exception as e:
             print(f"[Obstacle] 随机化失败: {e}")
@@ -1386,9 +1329,13 @@ class ROSbotNavigationEnv(gym.Env):
         dt = self.timestep / 1000.0
         
         if dt > 0 and self.state_buffer['previous_time'] > 0:
-            # 线加速度
-            current_vel = np.linalg.norm(self.state_buffer['previous_velocity'][:2])
-            prev_vel = np.linalg.norm(self.state_buffer['previous_velocity'][:2])
+            # 使用里程计的线速度作为当前速度，状态缓存中的为上一时刻速度
+            try:
+                odom = self._get_odometry_data()
+                current_vel = float(odom.get('linear_velocity', 0.0))
+            except Exception:
+                current_vel = float(np.linalg.norm(self.state_buffer['previous_velocity'][:2]))
+            prev_vel = float(np.linalg.norm(self.state_buffer['previous_velocity'][:2]))
             linear_acc = (current_vel - prev_vel) / dt
         else:
             linear_acc = 0.0
@@ -1454,46 +1401,44 @@ class ROSbotNavigationEnv(gym.Env):
             angular_acceleration
         ], dtype=np.float32)
     
-    def _update_amcl_state(self):
-        """更新AMCL状态"""
-        # AMCL 停用
-        pass
-        # # 获取最新传感器数据
-        # lidar_data = self._get_lidar_data()
-        # odometry_data = self._get_odometry_data()
-        
-        # # AMCL定位更新
-        # try:
-        #     result = self.amcl_localizer.localize(lidar_data, odometry_data)
-        #     if result is not None and isinstance(result, dict):
-        #         # 确保所有必要的键都存在
-        #         required_keys = ['position_estimated', 'orientation_estimated', 'velocity_estimated']
-        #         if all(key in result for key in required_keys):
-        #             self.amcl_result = result
-        # except Exception as e:
-        #     print(f"AMCL定位更新失败: {e}")
-        
-        # # 更新历史状态
-        # current_time = self.supervisor.getTime()
-        
-        # self.state_buffer['previous_position'] = self.amcl_result['position_estimated'].copy()
-        # self.state_buffer['previous_velocity'] = self.amcl_result['velocity_estimated'].copy()
-        # self.state_buffer['previous_orientation'] = self.amcl_result['orientation_estimated'].copy()
-        
-        # if self.state_buffer['previous_time'] == 0:
-        #     self.state_buffer['previous_time'] = current_time
-    
+
     def _calculate_reward(self, action, observation):
         """使用RewardFunctions类计算奖励"""
+        # 在本步开始时仅计算一次里程计、线速度与加速度，后续复用
+        try:
+            odom = self._get_odometry_data()
+        except Exception:
+            odom = {'linear_velocity': 0.0, 'angular_velocity': 0.0}
+        # 线速度（m/s）
+        try:
+            current_linear_vel = float(odom.get('linear_velocity', 0.0))
+        except Exception:
+            current_linear_vel = 0.0
+        # 角速度（rad/s）
+        try:
+            current_angular_vel = float(odom.get('angular_velocity', 0.0))
+        except Exception:
+            current_angular_vel = 0.0
+        dt = max(1e-6, self.timestep / 1000.0)
+        prev_linear_vel = float(getattr(self, '_prev_linear_velocity_scalar', 0.0))
+        current_linear_acc = (current_linear_vel - prev_linear_vel) / dt
+        # 缓存以便 info 与下次计算
+        self._prev_linear_velocity_scalar = current_linear_vel
+        self._current_linear_vel = current_linear_vel
+        self._current_linear_acc = current_linear_acc
+        self._current_angular_vel = current_angular_vel
+
         # 准备环境状态字典，传递给奖励函数
         env_state = {
             'get_sup_position': self._get_sup_position,
             'get_sup_orientation': self._get_sup_orientation,
             'calculate_distance_to_target': self._calculate_distance_to_target,
             'get_lidar_features': self._get_lidar_features,
-            'get_odometry_data': self._get_odometry_data,
+            # 返回本步缓存的里程计，避免重复查询
+            'get_odometry_data': (lambda od=odom: od),
             'calculate_angular_acceleration': self._calculate_angular_acceleration,
-            'estimate_linear_acceleration': self._estimate_acceleration,
+            # 返回本步预计算的线性加速度（不再重复计算）
+            'estimate_linear_acceleration': (lambda acc=self._current_linear_acc: np.array([acc], dtype=np.float32)),
             'detect_collision_simple': self._detect_collision_simple,
             'episode_steps': self.episode_steps,
             'cargo_type': self.cargo_type,
@@ -1513,6 +1458,15 @@ class ROSbotNavigationEnv(gym.Env):
         
         # 检查奖励函数是否设置了终止标志
         self._reward_terminate_flag = env_state.get('terminate', False)
+        # 捕获奖励函数暴露的步级统计指标
+        try:
+            metrics = env_state.get('step_metrics', None)
+            if isinstance(metrics, dict):
+                self._last_step_metrics = metrics.copy()
+            else:
+                self._last_step_metrics = {}
+        except Exception:
+            self._last_step_metrics = {}
         
         return reward
     
@@ -1711,6 +1665,24 @@ class ROSbotNavigationEnv(gym.Env):
             'cargo_type': self.cargo_type,
             'last_collision': getattr(self, '_last_collision_info', None)
         }
+        # 合并奖励函数传回的步级统计指标
+        try:
+            if isinstance(getattr(self, '_last_step_metrics', None), dict):
+                # 仅拷贝关心的字段，避免污染info
+                if 'linear_acc' in self._last_step_metrics:
+                    info['linear_acc'] = float(self._last_step_metrics['linear_acc'])
+                if 'wall_proximity_raw' in self._last_step_metrics:
+                    info['wall_proximity_raw'] = float(self._last_step_metrics['wall_proximity_raw'])
+        except Exception:
+            pass
+        # 将本步缓存的线速度/加速度直接写入info，供回调高效使用
+        try:
+            info['linear_vel'] = float(getattr(self, '_current_linear_vel', 0.0))
+            if 'linear_acc' not in info:
+                info['linear_acc'] = float(abs(getattr(self, '_current_linear_acc', 0.0)))
+            info['angular_vel'] = float(getattr(self, '_current_angular_vel', 0.0))
+        except Exception:
+            pass
         
         return info
 

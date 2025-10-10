@@ -7,6 +7,7 @@ from doctest import debug
 import numpy as np
 import math
 from typing import Dict, List, Tuple, Any, Set
+from collections import deque
     
 class RewardFunctions:
     """
@@ -41,6 +42,8 @@ class RewardFunctions:
         # 连续同方向旋转跟踪（用于靠墙惩罚叠加）
         self.last_rotation_sign = 0   # -1: 顺时针(示意)，+1: 逆时针，0: 无明显旋转
         self.rotation_streak = 0      # 连续相同方向旋转的步数
+        # 速度稳定性统计（线速度方差）
+        self._vel_hist = deque(maxlen=50)
 
     def _debug(self, msg: str):
         """条件调试输出"""
@@ -73,6 +76,11 @@ class RewardFunctions:
         # 重置连续同方向旋转跟踪
         self.last_rotation_sign = 0
         self.rotation_streak = 0
+        # 重置速度历史（用于稳定性方差统计）
+        try:
+            self._vel_hist.clear()
+        except Exception:
+            self._vel_hist = deque(maxlen=50)
 
     def calculate_reward(self, 
                             action: np.ndarray, 
@@ -108,9 +116,9 @@ class RewardFunctions:
             
             # 根据货物类型调整奖励
             if env_state['cargo_type'] == 'fragile':
-                rewards['cargo_specific'] = self._fragile_cargo_reward(action, observation)
+                rewards['cargo_specific'] = self._fragile_cargo_reward(action, observation, env_state)
             elif env_state['cargo_type'] == 'dangerous':
-                rewards['cargo_specific'] = self._dangerous_cargo_reward(action, observation)
+                rewards['cargo_specific'] = self._dangerous_cargo_reward(action, observation, env_state)
             
             # 1) 碰撞惩罚（强惩罚）
             pose=env_state['get_sup_position']()
@@ -118,10 +126,10 @@ class RewardFunctions:
             try:
                 if env_state['detect_collision_simple']():
                     if -2 <= pose[0] <= 2 and -2.7 <= pose[1] <= 2.7:
-                        rewards['collision_penalty'] = -500.0
+                        rewards['collision_penalty'] = -1000.0
                         collision_terminate = True
                     else:
-                        rewards['collision_penalty'] = -500.0
+                        rewards['collision_penalty'] = -1000.0
                         collision_terminate = True
                         # 不提前返回，终止标志将在后续逻辑中处理
                 else:
@@ -139,7 +147,7 @@ class RewardFunctions:
                     self.consecutive_stuck_steps += 1
                     rewards['stuck_penalty'] = (-1)*self.consecutive_stuck_steps*self.consecutive_stuck_steps
                     if self.consecutive_stuck_steps >= self.stuck_termination_threshold:
-                        rewards['stuck_penalty'] = -500.0
+                        rewards['stuck_penalty'] = -1000.0
                         stuck_terminate = True
                         print(f"[REWARD] 检测到卡住: 连续{self.consecutive_stuck_steps}步位置变化小于{self.stuck_position_threshold}")
                 else:
@@ -173,7 +181,7 @@ class RewardFunctions:
             if distance < DIST_THRESHOLD:
                 # 到达目标区域：必须停车才能获得完整奖励
                 stop_bonus = (1.0 - min(1.0, linear_vel + angular_vel)) * 10
-                base_goal_reward = 1000.0
+                base_goal_reward = 4000.0
                 # 如果速度足够小（接近停车），给予巨大奖励并终止
                 if (linear_vel < 0.1 and angular_vel < 0.1):
                     rewards['goal_reward'] = base_goal_reward + stop_bonus * getattr(args, 'stop_bonus_k', 100.0)
@@ -210,7 +218,7 @@ class RewardFunctions:
             # 6) 距离变化（靠近奖励）
             prev_d = self.prev_distance_to_target if self.prev_distance_to_target is not None else distance
             dist_change = prev_d - distance
-            if dist_change < 0 and distance<3:
+            if dist_change < 0 and distance<2:
                 rewards['distance_change_reward'] = dist_change*args.delta_distance_k
             else:
                 rewards['distance_change_reward'] = dist_change*args.delta_distance_k*((distance+1)/4)
@@ -328,8 +336,27 @@ class RewardFunctions:
 
             # if self.turn_steps >= 3:
             #     wall_prox_penalty *= (1.0 + beta * self.turn_steps)
-            rewards['wall_proximity_penalty'] = wall_prox_penalty*args.wall_proximity_penalty_k
+            rewards['wall_proximity_penalty'] = (-1)*wall_prox_penalty*args.wall_proximity_penalty_k
             #((distance+1)/3)
+
+            # === 暴露用于统计的原始安全度量与加速度（不乘系数） ===
+            # 使用 env_state['step_metrics'] 传递给环境，供 info 与训练回调统计
+            try:
+                if 'step_metrics' not in env_state or not isinstance(env_state.get('step_metrics'), dict):
+                    env_state['step_metrics'] = {}
+                # 1) 原始靠墙度量（墙面接近惩罚的原始值，不乘以 wall_proximity_penalty_k）
+                env_state['step_metrics']['wall_proximity_raw'] = float(wall_prox_penalty)
+                # 2) 线性加速度（幅值），从环境提供的估计接口获取
+                if 'estimate_linear_acceleration' in env_state and callable(env_state['estimate_linear_acceleration']):
+                    acc = env_state['estimate_linear_acceleration']()
+                    if hasattr(acc, '__len__'):
+                        lin_acc = float(acc[0])
+                    else:
+                        lin_acc = float(acc)
+                    env_state['step_metrics']['linear_acc'] = float(abs(lin_acc))
+            except Exception:
+                # 统计数据非关键，出错时静默忽略
+                pass
 
             
             # 11) 角度奖励：仅在“前方有路径”且“与目标夹角小于90°”时给予奖励
@@ -358,7 +385,7 @@ class RewardFunctions:
             front_clear = front_max > 0.4
             front_sum = sum(float(lidar_features[i]) for i in range(start_idx, end_idx + 1))
             if front_clear:
-                rewards['front_clear'] = front_sum*0.1*args.front_clear_k*(((-1)*(distance-6)**2*0.1+4))
+                rewards['front_clear'] = front_sum*0.1*args.front_clear_k*(((-1)*(distance-5)**2*0.1+3))
             else:
                 rewards['front_clear'] = 0.0
 
@@ -404,19 +431,21 @@ class RewardFunctions:
                     )
                     # 计算方向差异
                     angle_diff = abs((target_angle - movement_angle + math.pi) % (2*math.pi) - math.pi)
-                    # 角度差越小，奖励越大（从1.0到0）
-                    if distance > 8:
-                        alignment = 1.0 - angle_diff/(((-0.017)*(distance-8)**2+0.8)*math.pi)
-                    elif 8> distance > 3:
-                        alignment = 1.0 - angle_diff/(((-0.01)*(distance-5.5)**2+1)*math.pi)
-                    elif distance < 3:
-                        alignment = 1.0 - angle_diff/(((-0.017)*(distance-6)**2+0.8)*math.pi)
+                    # # 角度差越小，奖励越大（从1.0到0）
+                    # if distance > 8:
+                    #     alignment = 1.0 - angle_diff/(((-0.017)*(distance-8)**2+0.8)*math.pi)
+                    # if distance > 2:
+                    #     alignment = 1.0 - angle_diff/(((-0.01)*(distance-5.5)**2+1)*math.pi)
+                    # elif distance < 2:
+                    #     alignment = 1.0 - angle_diff/(((-0.017)*(distance-6)**2+0.8)*math.pi)
 
+                    #alignment = 1.0 - angle_diff/(((-0.025)*(distance-5)**2+1)*math.pi) # 最开始约束约为70度，放大到180再缩小到70
+                    alignment = 1.0 - angle_diff/(((0.0055)*(distance)**2+0.35)*math.pi) # 最开始约束约为70度，放大到180再缩小到70
                     # 奖励 = 对齐度 × 移动距离 × 系数 X 转圈衰减 X 距离目标加成
                     if alignment < 0:
-                        directional_reward = alignment * abs(dist_change) * getattr(args, 'directional_movement_k', 15.0)*((distance-6)*(distance-6)*0.2+1)
+                        directional_reward = alignment * abs(dist_change) * getattr(args, 'directional_movement_k', 15.0)*((distance-5)*(distance-5)*0.2+1)
                     else:
-                        directional_reward = alignment * dist_change * getattr(args, 'directional_movement_k', 15.0)*((distance-6)*(distance-6)*0.2+1)
+                        directional_reward = alignment * dist_change * getattr(args, 'directional_movement_k', 15.0)*((distance-5)*(distance-5)*0.2+1)
                 except Exception as e:
                     print(f"Error in directional movement reward calculation: {e}")
                     directional_reward = 0.0
@@ -531,56 +560,48 @@ class RewardFunctions:
         #angle = math.atan2(math.sin(angle), math.cos(angle))
         return angle
     
-    def _fragile_cargo_reward(self, action: np.ndarray, observation: np.ndarray) -> float:
+    def _fragile_cargo_reward(self, action: np.ndarray, observation: np.ndarray, env_state: Dict[str, Any]) -> float:
         """
         易碎品专用奖励
         
         参数:
             action: 当前执行的动作
             observation: 当前观察
-            
+            env_state: 环境状态（用于获取加速度与里程计）
+        
         返回:
             float: 奖励值
         """
         reward = 0.0
-        
-        # 稳定性奖励 - 惩罚大加速度（从env_state获取，加速度不再从obs索引）
-        linear_acc = 0.0
-        angular_acc = 0.0
-        stability_penalty = -abs(linear_acc) * 5.0 - abs(angular_acc) * 3.0
-        reward += stability_penalty
-        
-        # 速度限制 - 惩罚高速
+        args = env_state.get('args', None)
+        # 1) 高加速度限制：对超出阈值的线性加速度进行惩罚
         try:
-            if isinstance(observation, dict):
-                odom = observation.get('_odometry_cache_', None)
-                if odom is None:
-                    odom = {'linear_velocity': 0.0}
-                linear_vel = float(odom['linear_velocity'])
-            else:
-                linear_vel = float(observation[23])
+            acc_arr = env_state.get('estimate_linear_acceleration', lambda: np.array([0.0]))()
+            linear_acc = float(acc_arr[0] if hasattr(acc_arr, '__len__') else float(acc_arr))
         except Exception:
-            linear_vel = 0.0
-        velocity_penalty = -max(0, linear_vel - 1.0) * 3.0  # 超过1m/s惩罚
-        reward += velocity_penalty
-        
-        # 角速度平滑性
+            linear_acc = 0.0
+        acc_thr = float(getattr(args, 'fragile_acc_threshold', 2) if args is not None else 2)  # m/s^2
+        acc_k = float(getattr(args, 'fragile_acc_penalty_k', 3.0) if args is not None else 3.0)
+        acc_excess = max(0.0, abs(linear_acc) - acc_thr)
+        accel_penalty = -acc_k * (acc_excess ** 2)
+        reward += accel_penalty
+
+        # 2) 去除每步的速度方差计算以降低开销；方差改为在训练回调的滑动窗口阶段统计
+
+        # 3) 可选：角速度平滑性（保持轻微约束）
         try:
-            if isinstance(observation, dict):
-                odom = observation.get('_odometry_cache_', None)
-                if odom is None:
-                    odom = {'angular_velocity': 0.0}
-                angular_vel = abs(float(odom['angular_velocity']))
-            else:
-                angular_vel = abs(float(observation[40]))
+            ang_vel = float(env_state.get('get_odometry_data', lambda: {'angular_velocity': 0.0})().get('angular_velocity', 0.0))
         except Exception:
-            angular_vel = 0.0
-        angular_penalty = -angular_vel * 2.0 if angular_vel > 1.0 else 0.0
+            ang_vel = 0.0
+        ang_penalty_k = float(getattr(args, 'fragile_ang_vel_penalty_k', 0.3) if args is not None else 0.3)
+        angular_penalty = -ang_penalty_k * max(0.0, abs(ang_vel) - 1.0)
         reward += angular_penalty
-        
+
+        # 不在奖励函数内暴露速度方差（避免重复与性能开销），在训练回调中基于线速度窗口统计
+
         return reward
     
-    def _dangerous_cargo_reward(self, action: np.ndarray, observation: np.ndarray) -> float:
+    def _dangerous_cargo_reward(self, action: np.ndarray, observation: np.ndarray, env_state: Dict[str, Any]) -> float:
         """
         危险品专用奖励
         
@@ -592,21 +613,49 @@ class RewardFunctions:
             float: 奖励值
         """
         reward = 0.0
+
+        args = env_state.get('args', None)
+        # 1) 高加速度限制：对超出阈值的线性加速度进行惩罚
+        try:
+            acc_arr = env_state.get('estimate_linear_acceleration', lambda: np.array([0.0]))()
+            linear_acc = float(acc_arr[0] if hasattr(acc_arr, '__len__') else float(acc_arr))
+        except Exception:
+            linear_acc = 0.0
+        acc_thr = float(getattr(args, 'fragile_acc_threshold', 0.8) if args is not None else 0.8)  # m/s^2
+        acc_k = float(getattr(args, 'fragile_acc_penalty_k', 3.5) if args is not None else 3.5)
+        acc_excess = max(0.0, abs(linear_acc) - acc_thr)
+        accel_penalty = -acc_k * (acc_excess ** 2)
+        reward += accel_penalty
+
+        # 2) 去除每步的速度方差计算以降低开销；方差改为在训练回调的滑动窗口阶段统计
+
+        # 3) 可选：角速度平滑性（保持轻微约束）
+        try:
+            ang_vel = float(env_state.get('get_odometry_data', lambda: {'angular_velocity': 0.0})().get('angular_velocity', 0.0))
+        except Exception:
+            ang_vel = 0.0
+        ang_penalty_k = float(getattr(args, 'fragile_ang_vel_penalty_k', 0.3) if args is not None else 0.3)
+        angular_penalty = -ang_penalty_k * max(0.0, abs(ang_vel) - 1.0)
+        reward += angular_penalty
         
         # 安全性奖励 - 保持安全距离
+        # 安全性奖励 - 保持安全距离
         try:
-            if isinstance(observation, dict):
-                # 通过 env_state 获取 LiDAR 特征（在calculate_reward中已有该函数）
-                # 这里使用一个保守的默认，实际计算在主奖励中涵盖
-                lidar_data = np.array([1.0]*20, dtype=np.float32)
+            # 优先通过环境的雷达特征接口（更一致）
+            if 'get_lidar_features' in env_state and callable(env_state['get_lidar_features']):
+                lidar_data = env_state['get_lidar_features']()
             else:
-                lidar_data = observation[0:20]
+                # 回退：从观测中提取或默认安全值
+                if isinstance(observation, dict):
+                    lidar_data = np.array([1.0]*20, dtype=np.float32)
+                else:
+                    lidar_data = observation[0:20]
         except Exception:
             lidar_data = np.array([1.0]*20, dtype=np.float32)
-        min_obstacle_dist = min(lidar_data) * 10.0  # 反归一化
+        min_obstacle_dist = min(lidar_data)
         
-        if min_obstacle_dist < 0.5:  # 距离障碍物小于0.5m
-            safety_penalty = -20.0 * (0.5 - min_obstacle_dist)
+        if min_obstacle_dist < 0.7:  # 距离障碍物小于0.7m
+            safety_penalty = -10.0 * (0.7 - min_obstacle_dist)
             reward += safety_penalty
         
         # 保守速度奖励
@@ -620,7 +669,7 @@ class RewardFunctions:
                 linear_vel = float(observation[23])
         except Exception:
             linear_vel = 0.0
-        conservative_reward = -abs(linear_vel) * 2.0 if linear_vel > 0.8 else 0.0
+        conservative_reward = -abs(linear_vel-0.5) * 2.5 if linear_vel > 0.5 else 0.0
         reward += conservative_reward
         
         return reward

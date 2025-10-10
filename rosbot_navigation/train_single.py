@@ -6,6 +6,7 @@
 
 import os
 import sys
+import signal
 import argparse
 from pathlib import Path
 import numpy as np
@@ -51,7 +52,8 @@ def plot_episode_positions_and_rewards(
     aggregate_csv: Optional[str] = "trajectories.csv",
     aggregate_jsonl: Optional[str] = "trajectories.jsonl",
     draw_trajectory: bool = False,
-    episode_task_info: Optional[Dict] = None
+    episode_task_info: Optional[Dict] = None,
+    terminal_global_step: Optional[int] = None
 ) -> None:
     """
     将本回合内每一步车辆的位置与奖励绘制到图像中并保存（基于train_stage1.py实现）
@@ -93,7 +95,8 @@ def plot_episode_positions_and_rewards(
             ys = [float(p[1]) for p in positions]
             total_reward = float(np.sum(rewards)) if len(rewards) > 0 else 0.0
             
-            fig, ax = plt.subplots(figsize=(6, 6), dpi=150)
+            # 使用更宽的画布以匹配可行区域的长方形比例
+            fig, ax = plt.subplots(figsize=(10, 6), dpi=150)
             
             # 可选：绘制轨迹线（默认关闭，避免视觉上连接起点与终点）
             if draw_line:
@@ -123,13 +126,18 @@ def plot_episode_positions_and_rewards(
             # 提升点的可见度：稍大尺寸+细描边
             sc = ax.scatter(xs, ys, c=rclipped, cmap=cmap, norm=norm, s=20, alpha=0.98,
                             edgecolors='k', linewidths=0.1)
-            cbar = plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+            # 将颜色条移动到上方，使用水平布局；不设置标签，避免与 x 轴标签重叠
+            cbar = plt.colorbar(sc, ax=ax, orientation='horizontal', pad=0.10)
             try:
                 tick_vals = np.linspace(float(vmin), float(vmax), 5)
                 cbar.set_ticks(tick_vals)
             except Exception:
                 pass
-            cbar.set_label(f'step reward [{vmin}, {vmax}]')
+            # 不设置 colorbar 标签，避免文字与 x 轴标签重合
+            try:
+                cbar.ax.xaxis.set_ticks_position('top')
+            except Exception:
+                pass
             
             # 标注起点与终点（优先使用传入的 episode_task_info）
             try:
@@ -146,6 +154,28 @@ def plot_episode_positions_and_rewards(
                     ax.scatter([float(sp[0])], [float(sp[1])], marker='*', s=120, c='green', label='start')
                 if tp is not None and len(tp) >= 2:
                     ax.scatter([float(tp[0])], [float(tp[1])], marker='*', s=120, c='red', label='target')
+            except Exception:
+                pass
+
+            # 绘制本回合激活的障碍物为正方形（边长0.6m，细线）
+            try:
+                obstacle_positions = None
+                if episode_task_info is not None and 'obstacle_positions' in episode_task_info:
+                    obstacle_positions = episode_task_info.get('obstacle_positions', None)
+                elif env is not None and hasattr(env, '_active_obstacle_positions'):
+                    obstacle_positions = getattr(env, '_active_obstacle_positions', None)
+                if obstacle_positions:
+                    added_label = False
+                    for (ox, oy) in obstacle_positions:
+                        try:
+                            ox = float(ox); oy = float(oy)
+                        except Exception:
+                            continue
+                        rect = Rectangle((ox - 0.3, oy - 0.3), 0.6, 0.6,
+                                         linewidth=0.8, edgecolor='black', facecolor='none', alpha=0.9,
+                                         label=('obstacle' if not added_label else None))
+                        ax.add_patch(rect)
+                        added_label = True
             except Exception:
                 pass
             
@@ -165,25 +195,43 @@ def plot_episode_positions_and_rewards(
                             ax.arrow(xs[-1], ys[-1], dx, dy, head_width=0.1 * scale, head_length=0.1 * scale, fc='k', ec='k', length_includes_head=True)
                 except Exception:
                     pass
-            
-            # 边界框
+
+            # 边界框（保持大的约束框）
             try:
-                from matplotlib.patches import Rectangle
                 boundary = Rectangle((-6.0, -4.0), 12.0, 8.0,
-                                    linewidth=1.2, edgecolor='orange', facecolor='none',
-                                    linestyle='--', alpha=0.9, label='boundary')
+                                     linewidth=1.2, edgecolor='orange', facecolor='none',
+                                     linestyle='--', alpha=0.9, label='boundary')
                 ax.add_patch(boundary)
+                # 设置矩形轴范围，便于观察细节
+                ax.set_xlim(-6.2, 6.2)
+                ax.set_ylim(-4.2, 4.2)
             except Exception:
                 pass
-            
-            ax.set_title(f"Episode {episode_index} | Steps: {len(xs)} | SumR: {total_reward:.2f}")
+
+            # 在标题标注回合步数与终止的全局步数
+            term_global = int(terminal_global_step) if terminal_global_step is not None else None
+            if term_global is not None:
+                title_str = f"Episode {episode_index} | EpisodeSteps: {len(xs)} | GlobalStep: {term_global} | SumR: {total_reward:.2f}"
+            else:
+                title_str = f"Episode {episode_index} | EpisodeSteps: {len(xs)} | SumR: {total_reward:.2f}"
+            ax.set_title(title_str)
             ax.set_xlabel('x (m)')
             ax.set_ylabel('y (m)')
             ax.axis('equal')
             ax.grid(True, linestyle='--', alpha=0.3)
             ax.legend(loc='best')
+
+            # 在终止位置附近添加文本标注（显示全局步数）
+            try:
+                if len(xs) > 0:
+                    note = f"term@{term_global}" if term_global is not None else f"term {len(xs)}"
+                    ax.annotate(note, (xs[-1], ys[-1]), textcoords='offset points',
+                                xytext=(5, 5), fontsize=8, color='k')
+            except Exception:
+                pass
             
             out_path = save_dir / f"episode_{episode_index:05d}.png"
+            # 留出顶部空间以容纳水平 colorbar 与标题
             fig.tight_layout()
             fig.savefig(str(out_path))
         
@@ -265,9 +313,12 @@ class EnhancedTrainingCallback(BaseCallback):
                  step_avg_window: int = 100,
                  display_plot: bool = False,
                  enable_obstacle_curriculum: bool = False,
-                 verbose: int = 0):
+                 verbose: int = 0,
+                 model_save_path: Optional[str] = None):
         super().__init__(verbose)
         self.env = env
+        self.model_save_path = model_save_path
+        self.interrupted = False
         # 兼容 Monitor 包装，保留对底层环境的引用以用于调试信息/可视化
         try:
             self.base_env = env.env if hasattr(env, 'env') else env
@@ -285,6 +336,13 @@ class EnhancedTrainingCallback(BaseCallback):
         # 单步奖励滑动平均窗口
         self.step_avg_window = int(max(1, step_avg_window))
         self.step_reward_window = deque(maxlen=self.step_avg_window)
+        # 线性加速度与靠墙原始度量的滑动窗口
+        self.linear_acc_window = deque(maxlen=self.step_avg_window)
+        self.wall_proximity_window = deque(maxlen=self.step_avg_window)
+        # 线速度窗口（用于在记录时计算方差，降低每步开销）
+        self.linear_vel_window = deque(maxlen=self.step_avg_window)
+        # 角速度窗口（用于在记录时计算平均值与方差）
+        self.angular_vel_window = deque(maxlen=self.step_avg_window)
         
         # 训练损失（若可用）占位，避免未定义报错
         self.critic_loss_last = None
@@ -313,6 +371,10 @@ class EnhancedTrainingCallback(BaseCallback):
         self.recent_approach_window = deque(maxlen=100)  # 最近100个episode的接近情况
         self.total_approaches = 0
         
+        # 自动保存设置（用于应对手动中断）
+        self.autosave_interval = 10000  # 每10000步自动保存一次
+        self.last_autosave_step = 0
+        
     def _on_step(self) -> bool:
         # 更新环境的全局训练步数（用于渐进式障碍物课程）
         if self.enable_obstacle_curriculum:
@@ -335,11 +397,22 @@ class EnhancedTrainingCallback(BaseCallback):
         self.current_episode_reward += reward
         self.current_episode_length += 1
         
-        # 更新滑动窗口（内存累积，减少MLflow写频率）
+        # 更新滑动窗口（内存累积，减少频繁统计开销）
         try:
             self.step_reward_window.append(float(reward))
+            la = info.get('linear_acc', None)
+            if la is not None and np.isfinite(la):
+                self.linear_acc_window.append(float(la))
+            wp = info.get('wall_proximity_raw', None)
+            if wp is not None and np.isfinite(wp):
+                self.wall_proximity_window.append(float(wp))
+            lv = info.get('linear_vel', None)
+            if lv is not None and np.isfinite(lv):
+                self.linear_vel_window.append(float(lv))
+            av = info.get('angular_vel', None)
+            if av is not None and np.isfinite(av):
+                self.angular_vel_window.append(float(av))
         except Exception:
-            # 避免因为异常影响训练
             pass
         
         # 收集位置信息（用于轨迹可视化）
@@ -401,7 +474,8 @@ class EnhancedTrainingCallback(BaseCallback):
                     # 使用记录的当前回合起点和终点，而不是 env.task_info（已更新为下一回合）
                     episode_task_info = {
                         'start_pos': self.current_episode_start_pos,
-                        'target_pos': self.current_episode_target_pos
+                        'target_pos': self.current_episode_target_pos,
+                        'obstacle_positions': getattr(getattr(self, 'base_env', self.env), '_active_obstacle_positions', None)
                     }
                     plot_episode_positions_and_rewards(
                         positions=self.current_episode_positions,
@@ -421,6 +495,7 @@ class EnhancedTrainingCallback(BaseCallback):
                         draw_trajectory=self.draw_trajectory,
                         aggregate_csv="trajectories.csv",
                         aggregate_jsonl="trajectories.jsonl",
+                        terminal_global_step=self.num_timesteps,
                         episode_task_info=episode_task_info
                     )
             except Exception as e:
@@ -443,6 +518,13 @@ class EnhancedTrainingCallback(BaseCallback):
             #success_rate_total = self.total_successes / self.total_episodes if self.total_episodes > 0 else 0.0
             #approach_rate_total = self.total_approaches / self.total_episodes if self.total_episodes > 0 else 0.0
             avg_step_reward = float(np.mean(self.step_reward_window)) if len(self.step_reward_window) > 0 else 0.0
+            avg_linear_acc = float(np.mean(self.linear_acc_window)) if len(self.linear_acc_window) > 0 else 0.0
+            avg_wall_proximity = float(np.mean(self.wall_proximity_window)) if len(self.wall_proximity_window) > 0 else 0.0
+            # 线速度/角速度统计仅在记录时计算，避免逐步重复计算
+            avg_linear_vel = float(np.mean(self.linear_vel_window)) if len(self.linear_vel_window) > 0 else 0.0
+            linear_velocity_var = float(np.var(self.linear_vel_window)) if len(self.linear_vel_window) > 1 else 0.0
+            avg_angular_vel = float(np.mean(self.angular_vel_window)) if len(self.angular_vel_window) > 0 else 0.0
+            angular_velocity_var = float(np.var(self.angular_vel_window)) if len(self.angular_vel_window) > 1 else 0.0
             # 回合统计滑动平均（最近100个回合）
             avg_reward = float(np.mean(self.episode_rewards[-100:])) if len(self.episode_rewards) > 0 else 0.0
             avg_length = float(np.mean(self.episode_lengths[-100:])) if len(self.episode_lengths) > 0 else 0.0
@@ -470,12 +552,22 @@ class EnhancedTrainingCallback(BaseCallback):
                     "avg_episode_length_100": float(self.current_episode_length),
                     "success_rate_recent_100": float(success_rate_recent),
                     "approach_rate_recent_100": float(approach_rate_recent),
+                    "avg_linear_acc_window": avg_linear_acc,
+                    "avg_wall_proximity_window": avg_wall_proximity,
+                    "avg_linear_vel_window": avg_linear_vel,
+                    "linear_velocity_var_window": linear_velocity_var,
+                    "avg_angular_vel_window": avg_angular_vel,
+                    "angular_velocity_var_window": angular_velocity_var,
                 }, step=self.num_timesteps)
 
             if self.verbose > 0:
                 print(f"\n{'='*80}")
                 print(f"步数 {self.num_timesteps} - 统计信息:")
                 print(f"  单步平均奖励(窗口{self.step_avg_window}): {avg_step_reward:.2f}")
+                print(f"  平均线性加速度(窗口{self.step_avg_window}): {avg_linear_acc:.4f} m/s^2")
+                print(f"  平均靠墙原始度量(窗口{self.step_avg_window}): {avg_wall_proximity:.4f}")
+                print(f"  线速度均值(窗口{self.step_avg_window}): {avg_linear_vel:.4f} m/s | 方差: {linear_velocity_var:.6f}")
+                print(f"  角速度均值(窗口{self.step_avg_window}): {avg_angular_vel:.4f} rad/s | 方差: {angular_velocity_var:.6f}")
                 print(f"  总Episodes: {self.total_episodes}")
                 if len(self.episode_rewards) > 0:
                     print(f"  平均奖励(最近100): {avg_reward:.2f}")
@@ -485,6 +577,18 @@ class EnhancedTrainingCallback(BaseCallback):
                     print(f"  成功率(总体): {(self.total_successes/self.total_episodes*100) if self.total_episodes > 0 else 0:.1f}%")
                     print(f"  接近率(总体,<2m): {(self.total_approaches/self.total_episodes*100) if self.total_episodes > 0 else 0:.1f}%")
                 print(f"{'='*80}\n")
+        
+        # 自动保存机制（应对手动中断）
+        if self.model_save_path and (self.num_timesteps - self.last_autosave_step) >= self.autosave_interval:
+            try:
+                autosave_path = str(self.model_save_path).replace('.zip', '_autosave.zip')
+                self.model.save(autosave_path)
+                self.last_autosave_step = self.num_timesteps
+                if self.verbose > 0:
+                    print(f"\u2713 自动保存模型到: {autosave_path} (步数: {self.num_timesteps})")
+            except Exception as e:
+                if self.verbose > 0:
+                    print(f"[WARN] 自动保存失败: {e}")
         
         return True
 
@@ -557,7 +661,13 @@ def train_single_cargo_model(
         macro_action_steps=args.macro_action_steps if args else 1,
         enable_speed_smoothing=args.enable_speed_smoothing if args else False,
         training_mode=args.training_mode if args else 'vertical_curriculum',
-        enable_obstacle_randomization=args.enable_obstacle_curriculum if args and hasattr(args, 'enable_obstacle_curriculum') else True,
+        # Flags for obstacle logic
+        enable_obstacle_curriculum=args.enable_obstacle_curriculum if args and hasattr(args, 'enable_obstacle_curriculum') else True,
+        enable_obstacle_randomization=args.enable_obstacle_curriculum if args and hasattr(args, 'enable_obstacle_curriculum') else True,  # backward compat
+        use_predefined_positions=args.use_predefined_positions if args and hasattr(args, 'use_predefined_positions') else False,
+        fixed_obstacle_count=args.fixed_obstacle_count if args and hasattr(args, 'fixed_obstacle_count') else 5,
+        lock_obstacles_per_stage=args.lock_obstacles_per_stage if args and hasattr(args, 'lock_obstacles_per_stage') else False,
+        debug=args.debug
     )
     
     # 设置args属性，供奖励函数使用
@@ -669,7 +779,7 @@ def train_single_cargo_model(
     # 7. 设置MLflow（如果需要）
     if args and hasattr(args, 'experiment_name') and args.experiment_name:
         mlflow.set_experiment(args.experiment_name)
-        mlflow.start_run(run_name=f"single_{args.leaner_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        mlflow.start_run(run_name=f"single_{args.leaner_name}")
         
         # 设置运行描述
         if args and hasattr(args, 'remark') and args.remark:
@@ -747,7 +857,8 @@ def train_single_cargo_model(
         verbose=args.verbose if args and hasattr(args, 'verbose') else 1,
         draw_trajectory=args.draw_trajectory if args and hasattr(args, 'draw_trajectory') else False,
         display_plot=args.display_plot if args and hasattr(args, 'display_plot') else False,
-        enable_obstacle_curriculum=args.enable_obstacle_curriculum if args and hasattr(args, 'enable_obstacle_curriculum') else False
+        enable_obstacle_curriculum=args.enable_obstacle_curriculum if args and hasattr(args, 'enable_obstacle_curriculum') else False,
+        model_save_path=model_save_path  # 传递模型保存路径用于自动保存
     )
     callbacks.append(enhanced_callback)
     
@@ -808,30 +919,32 @@ def main():
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
     # 常用训练参数
     parser.add_argument('--tensorboard_log', type=str, default='./logs', help='TensorBoard日志目录')
-    parser.add_argument('--experiment_name', type=str, default='Mamul_Single_Vertical', help='MLflow实验名称')
+    parser.add_argument('--experiment_name', type=str, default='Single-Vertical-R4.6.10', help='MLflow实验名称')
     parser.add_argument('--model_dir', type=str, 
-                        default=f'/root/workspace/RL_car2/rosbot_navigation/results/Mamul_Single_Vertical/env_test4.6.3_end_env3_{now}', 
+                        default=f'/root/workspace/RL_car2/rosbot_navigation/results/Single-Vertical-R4.6.10', 
                         help='模型保存目录')
-    parser.add_argument('--leaner_name', type=str, default='Env_test4.6.3_end_env3', help='leaner名称')
-    parser.add_argument('--remark', type=str, default='基于4.6.3.0版本，使用最终环境，尝试训练一步到位', help='remark')
+    
+    parser.add_argument('--cargo_type', type=str, default='normal', choices=['normal', 'fragile', 'dangerous'], help='货物类型')
+    cargo_type = parser.parse_known_args()[0].cargo_type
+    parser.add_argument('--leaner_name', type=str, default=f'R4.6.10_W2E4_T6.1_{cargo_type}_{now}', help='leaner名称')
+    parser.add_argument('--remark', type=str, default='T6.1再次训练', help='remark')
+    
+    parser.add_argument('--total_steps', type=int, default=250000, help='总训练步数')
 
     parser.add_argument('--pretrained_model_path', type=str, 
                         default='', 
                         help='预训练模型路径(.zip)，若提供则在其基础上继续训练')
-                        
+    
     parser.add_argument('--world_1', type=str, 
-                        default='/root/workspace/RL_car2/warehouse/worlds/vertical/warehouse5_env1.wbt', 
+                        default='/root/workspace/RL_car2/warehouse/worlds/warehouse2_end4.wbt', 
                         help='Webots world文件路径')
-    parser.add_argument('--training_mode', type=str, 
-                        default='vertical_curriculum', 
-                        help='训练模式')
-    # 可视化参数
-    parser.add_argument('--plot_vmin', type=float, default=-150, help='轨迹图奖励最小值')
-    parser.add_argument('--plot_vmax', type=float, default=150, help='轨迹图奖励最大值')
+
+    parser.add_argument('--training_mode', type=str, default='vertical_curriculum', help='训练模式')
+    # 绘图参数
+    parser.add_argument('--plot_vmin', type=float, default=-100, help='轨迹图奖励最小值')
+    parser.add_argument('--plot_vmax', type=float, default=100, help='轨迹图奖励最大值')
 
     # 基本参数
-    parser.add_argument('--cargo_type', type=str, default='normal', choices=['normal', 'fragile', 'dangerous'], help='货物类型')
-    parser.add_argument('--total_steps', type=int, default=200000, help='总训练步数')
     parser.add_argument('--device', type=str, default='cuda', help='计算设备')
     parser.add_argument('--seed', type=int, default=0, help='随机种子')
     
@@ -854,6 +967,7 @@ def main():
     parser.add_argument('--show_ui', type=bool, default=False, help='显示UI')
     parser.add_argument('--show_map', type=bool, default=False, help='显示地图')
     parser.add_argument('--display_plot', type=bool, default=False, help='显示轨迹图')
+    parser.add_argument('--debug', type=bool, default=False, help='调试模式')
     
     # TD3参数
     parser.add_argument('--learning_rate', type=float, default=3e-4, help='学习率')
@@ -876,27 +990,27 @@ def main():
     parser.add_argument('--step_avg_window', type=int, default=1000, help='单步奖励滑动平均窗口大小（步数）')
     parser.add_argument('--draw_trajectory', type=bool, default=True, help='绘制轨迹')
     
-    # 障碍物随机化参数
-    parser.add_argument('--enable_obstacle_curriculum', type=bool, default=False, help='启用渐进式障碍物课程学习（根据训练步数动态调整数量和位置）')
+    # 障碍物参数
+    parser.add_argument('--enable_obstacle_curriculum', type=bool, default=True, help='是否启用渐进式障碍物数量课程学习')
+    parser.add_argument('--use_predefined_positions', type=bool, default=True, help='True: 从当前world文件的WoodenBox初始位置集合中选择；False: 在范围内随机生成坐标')
+    parser.add_argument('--fixed_obstacle_count', type=int, default=-1, help='障碍物固定数量: >=0时生效并覆盖课程学习；-1时不生效（遵循课程或默认）')
+    parser.add_argument('--lock_obstacles_per_stage', type=bool, default=True, help='是否启用阶段锁定模式')
     
     # 继续训练参数
     parser.add_argument('--reset_num_timesteps', type=bool, default=False, help='继续训练时是否重置时间步计数到0（默认False表示连续计数）')
     
-
-    
     # 课程学习参数（兼容性）
     parser.add_argument('--curriculum_stage', type=str, default='end', help='课程阶段')
     
-
     # 奖励系数参数
     parser.add_argument('--delta_distance_k', type=float, default=30.0, help='距离变化奖励系数，以最大速度1.18m/s计，基础最大值约为0.7，线性')
     parser.add_argument('--movement_reward_k', type=float, default=0.5, help='移动奖励系数，基础最大值为10，线性')
 
     parser.add_argument('--liner_distance_reward', type=int, default=0,choices=[0, 1, 2], help='0:线性 1：负二次型 2：反比例')
-    parser.add_argument('--distance_k', type=float, default=0.4, help='基础距离奖励系数，基础最大值为50')
+    parser.add_argument('--distance_k', type=float, default=0.7, help='基础距离奖励系数，基础最大值为50')
 
-    parser.add_argument('--time_k', type=float, default=0.5, help='时间惩罚系数，线性')   
-    parser.add_argument('--wall_proximity_penalty_k', type=float, default=5, help='墙壁接近惩罚系数，每条线最大0.8，一共二十线，基础最大值14，线性')
+    parser.add_argument('--time_k', type=float, default=0.4, help='时间惩罚系数，线性')   
+    parser.add_argument('--wall_proximity_penalty_k', type=float, default=3, help='墙壁接近惩罚系数，每条线最大0.8，一共二十线，基础最大值14，线性')
 
     parser.add_argument('--angle_reward_k', type=float, default=5, help='角度奖励系数，基础最大值为10，二次型')
     parser.add_argument('--angle_change_k', type=float, default=15.0, help='角度变化奖励,以单步最大角度变化1计，基础最大值1，线性')
@@ -909,11 +1023,10 @@ def main():
     parser.add_argument('--approach_reward_k', type=float, default=0, help='接近奖励系数，基础最大值为10')  
     parser.add_argument('--slow_down_reward_k', type=float, default=0, help='接近目标减速奖励系数，基础最大值为10')
     args = parser.parse_args()
-    
     # 创建模型保存路径
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
     if args.model_dir is not None:
-        models_dir = Path(args.model_dir)
+        models_dir = Path(args.model_dir+"/"+args.leaner_name)
     else:   
         models_dir = Path(f"./models/single_train_{now}")
 

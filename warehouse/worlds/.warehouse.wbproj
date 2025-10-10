@@ -12,5 +12,5 @@ textFiles: -1
 globalOptionalRendering: CameraFrustums
 consoles: Console:All:All
 consoles: Console:All:All
-renderingDevicePerspectives: rosbot:camera depth;0;0.469576;0.606083;0.469962
+renderingDevicePerspectives: rosbot:camera depth;0;0.469576;0.606083;0.463688
 renderingDevicePerspectives: rosbot:camera rgb;0;0.470525;0.605292;0.0633803

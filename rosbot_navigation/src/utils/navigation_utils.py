@@ -20,16 +20,10 @@ class NavigationUtils:
             'unload_start': [-3.0, -2.0, 0.0],
             'start': [-5.0, 3.0, 0.0],       # 起点
             'unload': [-5.0, -2.0, 0.0],     # 卸货点
-            'dangerous': [5.0, 3.0, 0.0],    # 危险货物点
-            'fragile': [5.0, 1.7, 0.0],      # 易碎货物点
-            'normal': [5.0, 0.2, 0.0],       # 普通货物点
+            'dangerous': [3.0, 3.0, 0.0],    # 危险货物点
+            'fragile': [3.0, 1.7, 0.0],      # 易碎货物点
+            'normal': [3.0, 0.2, 0.0],       # 普通货物点
             'smaller': [-0.75, -0.55, 0.0]   # 小环境卸货点
-        }
-        
-        self.easy_positions_areas = {
-            'dangerous': [5.0, 3.0, 0.0],    # 危险货物点
-            'fragile': [5.0, 1.7, 0.0],      # 易碎货物点
-            'normal': [5.0, 0.2, 0.0]        # 普通货物点
         }
 
         # 区域定义（与现有代码兼容，提供别名）
@@ -170,12 +164,16 @@ class NavigationUtils:
         返回:
             起点和终点坐标元组
         """
+        
         if cargo_type not in self.navigation_config:
             cargo_type = 'normal'  # 默认为普通货物
+
         self.use_random_targets = False
+        all_start=True
+
         # 根据任务阶段选择起点和终点
         if cargo_type == 'normal':
-            if random.random() < 0.6:
+            if random.random() < 0.5:
                 # 从起点到各个货物点
                 if self.use_random_targets:
                     start_pos = self._generate_random_position_in_area('start_area')
@@ -193,7 +191,8 @@ class NavigationUtils:
                     target_pos = self.fixed_positions['unload']
                     #target_pos = self._generate_random_position_in_area('unload_area')
                 else:
-                    start_pos = self.fixed_positions['normal']
+                    start_type = random.choice(['dangerous', 'fragile', 'normal'])
+                    start_pos = self.fixed_positions[start_type]
                     target_pos = self.fixed_positions['unload']
         
         elif cargo_type == 'dangerous':
