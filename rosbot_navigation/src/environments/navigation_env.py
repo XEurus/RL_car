@@ -399,10 +399,12 @@ class ROSbotNavigationEnv(gym.Env):
         self.obstacle_y_range = [-3.5, 3.5]  # y 范围（用于旧的随机位置逻辑）
         self.obstacle_z_height = 0.3  # 障碍物高度（中心点）
         self.max_obstacles = 14  # 最大障碍物数量
-#        self.obstacle_curriculum_steps = [0,10000,16000,22000,29000,37000,46000,56000,67000,79000]  # 每个阶段的步数
-#        self.obstacle_curriculum_counts = [4,5,6,7,8,9,10,11,12,13]  # 对应的障碍物数量
-        self.obstacle_curriculum_steps = [0,5000,8000,12000,17000,26000,34000,46000,55000,65000]  # 每个阶段的步数
-        self.obstacle_curriculum_counts = [4,5,6,7,8,9,10,11,12,13]  # 对应的障碍物数量
+        self.obstacle_curriculum_steps = [0,10000,18000,26000,34000,43000,53000,64000,76000,89000,110000,133000,156000]  # 每个阶段的步数
+        self.obstacle_curriculum_counts = [2,3,4,5,6,7,8,9,10,11,12,13]  # 对应的障碍物数量
+        # self.obstacle_curriculum_steps = [0,10000,16000,22000,29000,37000,46000,56000,67000,79000]  # 每个阶段的步数
+        # self.obstacle_curriculum_counts = [4,5,6,7,8,9,10,11,12,13]  # 对应的障碍物数量
+        # self.obstacle_curriculum_steps = [0,5000,8000,12000,17000,26000,34000,46000,55000,65000]  # 每个阶段的步数
+        # self.obstacle_curriculum_counts = [4,5,6,7,8,9,10,11,12,13]  # 对应的障碍物数量
         # self.obstacle_curriculum_steps = [0,5000,7000,9000,12000,16000,21000,27000,34000,42000]  # 每个阶段的步数
         # self.obstacle_curriculum_counts = [4,5,6,7,8,9,10,11,12,13]  # 对应的障碍物数量
         # self.obstacle_curriculum_steps = [0, 1000,2000,3000,4000,5000,6000,7000,8000]  # 每个阶段的步数

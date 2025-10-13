@@ -924,20 +924,25 @@ def main():
                         default=f'/root/workspace/RL_car2/rosbot_navigation/results/Single-Vertical-R4.6.10', 
                         help='模型保存目录')
     
-    parser.add_argument('--cargo_type', type=str, default='normal', choices=['normal', 'fragile', 'dangerous'], help='货物类型')
+    parser.add_argument('--cargo_type', type=str, default='dangerous', choices=['normal', 'fragile', 'dangerous'], help='货物类型')
     cargo_type = parser.parse_known_args()[0].cargo_type
-    parser.add_argument('--leaner_name', type=str, default=f'R4.6.10_W2E4_T6.1_{cargo_type}_{now}', help='leaner名称')
-    parser.add_argument('--remark', type=str, default='T6.1再次训练', help='remark')
+    parser.add_argument('--leaner_name', type=str, default=f'R4.6.10_W2E4_T5.2_{cargo_type}_{now}', help='leaner名称')
+    parser.add_argument('--remark', type=str, default='T5.2.0 全任务微调到dangerous，提高各种限制系数', help='remark')
     
-    parser.add_argument('--total_steps', type=int, default=250000, help='总训练步数')
+    parser.add_argument('--total_steps', type=int, default=80000, help='总训练步数')
 
     parser.add_argument('--pretrained_model_path', type=str, 
-                        default='', 
+                        default='/root/workspace/RL_car2/rosbot_navigation/results/Single-Vertical-R4.6.10/R4.6.10_W2E4_T6.1_normal_20251009_221340/td3_R4.6.10_W2E4_T6.1_normal_20251009_221340_normal_400000_autosave_0.94.zip', 
                         help='预训练模型路径(.zip)，若提供则在其基础上继续训练')
     
     parser.add_argument('--world_1', type=str, 
                         default='/root/workspace/RL_car2/warehouse/worlds/warehouse2_end4.wbt', 
                         help='Webots world文件路径')
+    # 障碍物参数
+    parser.add_argument('--enable_obstacle_curriculum', type=bool, default=False, help='是否启用渐进式障碍物数量课程学习')
+    parser.add_argument('--use_predefined_positions', type=bool, default=False, help='True: 从当前world文件的WoodenBox初始位置集合中选择；False: 在范围内随机生成坐标')
+    parser.add_argument('--fixed_obstacle_count', type=int, default=-1, help='障碍物固定数量: >=0时生效并覆盖课程学习；-1时不生效（遵循课程或默认）')
+    parser.add_argument('--lock_obstacles_per_stage', type=bool, default=True, help='是否启用阶段锁定模式')
 
     parser.add_argument('--training_mode', type=str, default='vertical_curriculum', help='训练模式')
     # 绘图参数
@@ -989,12 +994,6 @@ def main():
     parser.add_argument('--mlflow_log_interval', type=int, default=500, help='MLflow记录间隔')
     parser.add_argument('--step_avg_window', type=int, default=1000, help='单步奖励滑动平均窗口大小（步数）')
     parser.add_argument('--draw_trajectory', type=bool, default=True, help='绘制轨迹')
-    
-    # 障碍物参数
-    parser.add_argument('--enable_obstacle_curriculum', type=bool, default=True, help='是否启用渐进式障碍物数量课程学习')
-    parser.add_argument('--use_predefined_positions', type=bool, default=True, help='True: 从当前world文件的WoodenBox初始位置集合中选择；False: 在范围内随机生成坐标')
-    parser.add_argument('--fixed_obstacle_count', type=int, default=-1, help='障碍物固定数量: >=0时生效并覆盖课程学习；-1时不生效（遵循课程或默认）')
-    parser.add_argument('--lock_obstacles_per_stage', type=bool, default=True, help='是否启用阶段锁定模式')
     
     # 继续训练参数
     parser.add_argument('--reset_num_timesteps', type=bool, default=False, help='继续训练时是否重置时间步计数到0（默认False表示连续计数）')

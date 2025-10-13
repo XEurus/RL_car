@@ -621,8 +621,8 @@ class RewardFunctions:
             linear_acc = float(acc_arr[0] if hasattr(acc_arr, '__len__') else float(acc_arr))
         except Exception:
             linear_acc = 0.0
-        acc_thr = float(getattr(args, 'fragile_acc_threshold', 0.8) if args is not None else 0.8)  # m/s^2
-        acc_k = float(getattr(args, 'fragile_acc_penalty_k', 3.5) if args is not None else 3.5)
+        acc_thr = float(getattr(args, 'fragile_acc_threshold', 1) if args is not None else 1)
+        acc_k = float(getattr(args, 'fragile_acc_penalty_k', 4.0) if args is not None else 4.0)
         acc_excess = max(0.0, abs(linear_acc) - acc_thr)
         accel_penalty = -acc_k * (acc_excess ** 2)
         reward += accel_penalty
@@ -640,23 +640,23 @@ class RewardFunctions:
         
         # 安全性奖励 - 保持安全距离
         # 安全性奖励 - 保持安全距离
-        try:
-            # 优先通过环境的雷达特征接口（更一致）
-            if 'get_lidar_features' in env_state and callable(env_state['get_lidar_features']):
-                lidar_data = env_state['get_lidar_features']()
-            else:
-                # 回退：从观测中提取或默认安全值
-                if isinstance(observation, dict):
-                    lidar_data = np.array([1.0]*20, dtype=np.float32)
-                else:
-                    lidar_data = observation[0:20]
-        except Exception:
-            lidar_data = np.array([1.0]*20, dtype=np.float32)
-        min_obstacle_dist = min(lidar_data)
+        # try:
+        #     # 优先通过环境的雷达特征接口（更一致）
+        #     if 'get_lidar_features' in env_state and callable(env_state['get_lidar_features']):
+        #         lidar_data = env_state['get_lidar_features']()
+        #     else:
+        #         # 回退：从观测中提取或默认安全值
+        #         if isinstance(observation, dict):
+        #             lidar_data = np.array([1.0]*20, dtype=np.float32)
+        #         else:
+        #             lidar_data = observation[0:20]
+        # except Exception:
+        #     lidar_data = np.array([1.0]*20, dtype=np.float32)
+        # min_obstacle_dist = min(lidar_data)
         
-        if min_obstacle_dist < 0.7:  # 距离障碍物小于0.7m
-            safety_penalty = -10.0 * (0.7 - min_obstacle_dist)
-            reward += safety_penalty
+        # if min_obstacle_dist < 0.8:  # 距离障碍物小于0.7m
+        #     safety_penalty = -20.0 * (0.8 - min_obstacle_dist)
+        #     reward += safety_penalty
         
         # 保守速度奖励
         try:
@@ -669,7 +669,7 @@ class RewardFunctions:
                 linear_vel = float(observation[23])
         except Exception:
             linear_vel = 0.0
-        conservative_reward = -abs(linear_vel-0.5) * 2.5 if linear_vel > 0.5 else 0.0
+        conservative_reward = -(linear_vel-0.4)* 70
         reward += conservative_reward
         
         return reward
