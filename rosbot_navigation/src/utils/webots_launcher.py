@@ -266,8 +266,8 @@ def start_webots_instance(instance_id: int,
         raise FileNotFoundError(f"未找到 world 文件: {base_world}")
 
     # 为 extern 控制器准备副本
-    extern_world = _prepare_extern_world(base_world, instance_id)
-
+    # extern_world = _prepare_extern_world(base_world, instance_id)
+    extern_world = base_world
     # 构建命令
     cmd = []
     # 优先使用 xvfb-run（在无显示环境），并指定 24-bit 深度以避免 OpenGL 初始化失败

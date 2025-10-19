@@ -464,6 +464,24 @@ class ROSbotNavigationEnv(gym.Env):
             self.lidar.enablePointCloud()
             self.lidar.enable(self.timestep)
         
+        # 彩色相机 - 用于图像识别
+        # 根据 Astra PROTO 文件，RGB 相机设备名称是 'camera color' (带空格)
+        self.camera_color = None
+        possible_camera_names = ['camera color', 'camera rgb', 'camera', 'Camera', 'rgb_camera', 'color_camera']
+        
+        for camera_name in possible_camera_names:
+            try:
+                self.camera_color = self.supervisor.getDevice(camera_name)
+                if self.camera_color:
+                    self.camera_color.enable(self.timestep)
+                    print(f"[Navigation Env] 彩色相机已启用: {camera_name}")
+                    break
+            except Exception as e:
+                continue
+        
+        if not self.camera_color:
+            print("[Navigation Env] 警告: 未找到彩色相机设备")
+        
         # 直接通过supervisor获取机器人位置
         self.robot_node = self.supervisor.getSelf()
         
@@ -535,15 +553,11 @@ class ROSbotNavigationEnv(gym.Env):
         self._prev_left_speed = 0.0
         self._prev_right_speed = 0.0
     
-    def test_reset(self, start_pose,target_pose, seed=None):
+    def test_reset(self,seed=None):
         """重置环境和状态"""
         super().reset(seed=seed)
 
         self._angle_mode_on_reset = 'axis'
-        self.task_info['start_pos'] = np.array(start_pose, dtype=np.float32)
-        self.task_info['target_pos'] = np.array(target_pose, dtype=np.float32)
-        self._reset_robot_position(start_pose)
-
         # 重置状态缓存
         self._reset_state_buffer()
         # 重置轨迹记录

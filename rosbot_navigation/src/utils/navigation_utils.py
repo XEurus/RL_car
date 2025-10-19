@@ -511,7 +511,7 @@ class NavigationTaskGenerator:
         fixed_positions = {
             'start': [-5.0, 3.0, 0.0],       # 起点
             'unload': [-5.0, -2.0, 0.0],     # 卸货点
-            'dangerous': [5.0, 3.0, 0.0],    # 危险货物点
+            'dangerous': [5.0, 3.2, 0.0],    # 危险货物点
             'fragile': [5.0, 1.7, 0.0],      # 易碎货物点
             'normal': [5.0, 0.2, 0.0],       # 普通货物点
         }
