@@ -308,26 +308,30 @@ def start_webots_instance(instance_id: int,
     # 绑定到单核可选：由外部调用者使用 taskset 控制
     env = os.environ.copy()
     
-    # 添加环境变量禁用GPU渲染，避免OpenGL问题
-    env['LIBGL_ALWAYS_SOFTWARE'] = '1'  # 强制使用软件渲染
-    env['WEBOTS_DISABLE_GPU'] = '1'
-    # 重要：不要使用 offscreen 平台（默认镜像通常没有该插件），在 xvfb-run 下使用 xcb 即可
-    env['QT_QPA_PLATFORM'] = 'xcb'
-    # 清理可能由 OpenCV 注入的插件路径，避免指向 cv2/qt/plugins 导致找不到 xcb
-    env.pop('QT_PLUGIN_PATH', None)
-    # 强化 Mesa/OpenGL 兼容设置，避免“Unable to load OpenGL functions”
-    env.setdefault('LIBGL_ALWAYS_INDIRECT', '1')
-    env.setdefault('MESA_GL_VERSION_OVERRIDE', '3.3')
-    env.setdefault('MESA_GLSL_VERSION_OVERRIDE', '330')
-    env.setdefault('QT_OPENGL', 'software')
-    env.setdefault('QT_QUICK_BACKEND', 'software')
-    env.setdefault('__GLX_VENDOR_LIBRARY_NAME', 'mesa')
-    env.setdefault('WEBOTS_DISABLE_SOUND', '1')
-    # 在 root/headless 环境下，禁用 QtWebEngine 沙盒
-    env['QTWEBENGINE_DISABLE_SANDBOX'] = '1'
-    env['QTWEBENGINE_CHROMIUM_FLAGS'] = '--no-sandbox'
-    # 尽量禁用 Webots 的 web 接口以减少对 QtWebEngine 的依赖
-    env['WEBOTS_DISABLE_WEB_INTERFACE'] = '1'
+    # 只在无头模式下添加环境变量禁用GPU渲染，避免OpenGL问题
+    # GUI模式下应使用正常的图形硬件加速
+    if headless:
+        env['LIBGL_ALWAYS_SOFTWARE'] = '1'  # 强制使用软件渲染
+        env['WEBOTS_DISABLE_GPU'] = '1'
+        # 重要：不要使用 offscreen 平台（默认镜像通常没有该插件），在 xvfb-run 下使用 xcb 即可
+        env['QT_QPA_PLATFORM'] = 'xcb'
+        # 清理可能由 OpenCV 注入的插件路径，避免指向 cv2/qt/plugins 导致找不到 xcb
+        env.pop('QT_PLUGIN_PATH', None)
+        # 强化 Mesa/OpenGL 兼容设置，避免"Unable to load OpenGL functions"
+        env.setdefault('LIBGL_ALWAYS_INDIRECT', '1')
+        env.setdefault('MESA_GL_VERSION_OVERRIDE', '3.3')
+        env.setdefault('MESA_GLSL_VERSION_OVERRIDE', '330')
+        env.setdefault('QT_OPENGL', 'software')
+        env.setdefault('QT_QUICK_BACKEND', 'software')
+        env.setdefault('__GLX_VENDOR_LIBRARY_NAME', 'mesa')
+        env.setdefault('WEBOTS_DISABLE_SOUND', '1')
+        # 在 root/headless 环境下，禁用 QtWebEngine 沙盒
+        env['QTWEBENGINE_DISABLE_SANDBOX'] = '1'
+        env['QTWEBENGINE_CHROMIUM_FLAGS'] = '--no-sandbox'
+        # 尽量禁用 Webots 的 web 接口以减少对 QtWebEngine 的依赖
+        env['WEBOTS_DISABLE_WEB_INTERFACE'] = '1'
+    
+    # 通用设置（GUI和headless模式都需要）
     env.setdefault('USER', os.environ.get('USER', 'default'))
 
     # 打印详细的启动信息和启用的参数

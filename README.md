@@ -1,249 +1,177 @@
-# ROSbot强化学习导航系统
+# ROSbot 导航系统：基于强化学习的端到端解决方案
 
-基于Webots仿真环境和AMCL定位的42维状态空间强化学习导航框架，支持三种货物类型（普通/易碎/危险品）的自适应导航策略。
+本项目旨在通过深度强化学习，赋予 ROSbot 在复杂动态环境中自主导航的能力。我们基于 Stable-Baselines3 框架，实现了 TD3 算法，并在 Webots 仿真环境中进行了大量的训练与验证。
 
-## 核心特性
+## 技术选型
 
-- **42维状态空间**: 融合LiDAR感知、AMCL定位、目标导航和航向控制信息
-- **AMCL粒子滤波定位**: 800粒子数的自适应蒙特卡洛定位，提供真实定位不确定性
-- **货物类型自适应**: 根据货物类型（普通/易碎/危险品）动态调整奖励和约束
-- **课程学习**: 渐进式不确定性训练，提高模型鲁棒性
-- **两阶段训练**: 基础训练+精细化微调，快速收敛到高性能
-- **完整实验管理**: MLflow集成，支持模型版本管理和对比分析
+*   **强化学习框架:** [Stable-Baselines3](https://stable-baselines3.readthedocs.io/en/master/)
+*   **仿真平台:** Webots
+*   **实验追踪:** MLflow
+*   **核心算法:** TD3 (Twin Delayed Deep Deterministic Policy Gradient)
 
-### 状态空间设计
+## 核心设计理念与特性
 
-| 维度范围 | 类型 | 说明 |
-|----------|------|------|
-| 0-19 | LiDAR感知 | 20维激光雷达数据，100°视野 |
-| 20-31 | AMCL定位 | 12维 - 位置(估计)、姿态(估计)、速度、加速度 |
-| 32-37 | 导航目标 | 6维 - 目标相对位置、起点、终点 |
-| 38-41 | 航向控制 | 4维 - 航向偏差、目标航向、角速度、角加速度 |
+为了实现高效且鲁棒的导航策略，我们设计并实现了一系列创新特性，这些是本项目的核心亮点。
 
-### 货物类型策略
+### 1. 训练策略：双维度课程学习 (Dual-Dimension Curriculum Learning)
 
-| 货物类型 | 最大线速度 | 特征约束 | 安全要求 |
-|----------|------------|----------|----------|
-| 普通 | 2.0 m/s | 基础避障 | 标准碰撞容忍 |
-| 易碎品 | 1.0 m/s | 稳定性优先，减速度惩罚 | 低碰撞率 <3% |
-| 危险品 | 0.8 m/s | 保守策略，安全距离优先 | 极低碰撞率 <2% |
+我们摒弃了单一难度的训练方式，设计了一套双维度、可配置的课程学习体系，旨在引导智能体循序渐进地掌握复杂技能。
 
-## 项目结构
+*   **垂直课程：动态障碍物递增**
+    我们定义了一个基于全局训练步数的“难度时间表” (`obstacle_curriculum_steps` & `obstacle_curriculum_counts`)。随着训练的深入，环境中的障碍物数量会自动增加，迫使智能体从简单的避障学起，逐步适应更拥挤、更复杂的场景。
 
-```
-rosbot_navigation/
-├── src/
-│   ├── environments/          # 环境模块
-│   │   └── navigation_env.py  # 42维AMCL导航环境
-│   ├── localization/          # 定位模块
-│   │   ├── amcl_localizer.py  # AMCL粒子滤波定位
-│   │   └── pose_estimator.py  # GPS+IMU备用定位
-│   ├── models/                # 模型模块
-│   │   └── td3_robust.py      # 改进TD3算法
-│   ├── utils/                 # 工具模块
-│   │   └── navigation_utils.py # 导航任务生成器
-│   └── interfaces/            # 接口模块
-├── config/
-│   └── training_config.yaml   # 训练配置文件
-├── scripts/
-│   ├── train_stage1.py        # 第一阶段训练
-│   ├── train_stage2.py        # 第二阶段微调（待实现）
-│   └── evaluate.py            # 模型评估（待实现）
-├── models/                    # 训练后的模型
-├── logs/                      # 训练日志
-└── data/                      # 实验数据
-```
+*   **阶段锁定机制 (`--lock_obstacles_per_stage`)**
+    这是我们课程学习设计的关键。当启用此模式时，进入下一个难度阶段后，系统并不会生成一组全新的随机障碍物。相反，它会**在前一阶段已有的障碍物集合基础上，新增一个或多个障碍物**。这种“累加式”的难度增长，确保了模型在探索新技能的同时，不会“遗忘”已经掌握的简单场景，极大地提升了学习的稳定性和连续性。
 
-## 环境要求
+*   **水平课程：任务参数自适应**
+    与障碍物课程并行，我们还设计了基于任务阶段 (`easy`, `medium`, `hard`) 的参数自适应机制。在训练初期，环境会设置更长的回合时间 (`max_episode_steps`) 和更宽松的成功判定条件，鼓励智能体进行更广泛的探索。随着训练的进行，这些参数会变得愈发严苛，促使智能体优化其导航效率。
 
-- **Python**: 3.8+
-- **Webots**: R2023b+
-- **GPU**: 可选，但推荐用于加速训练
-- **ROSbot模型**: warehouse/worlds/warehouse.wbt
+### 2. 奖励工程：面向行为的精细化塑造
 
-## 快速开始
+我们认为，精细的奖励函数是塑造理想行为的关键。因此，我们将奖励函数设计为多个子项的加权和，每一项都针对一个特定的行为目标，并且其权重均可通过命令行参数 (`--<reward_name>_k`) 进行精细调整。
 
-### 1. 安装依赖
+*   **目标导向奖励**
+    *   `--distance_k`: 核心驱动力，鼓励智能体不断接近目标点。
+    *   `--angle_reward_k`: 鼓励智能体使其朝向与目标方向保持一致，减少无效的侧向移动。
+    *   `--directional_movement_k`: 直接奖励朝向目标方向的移动分量，确保每一步都在“做有用功”。
 
-```bash
-cd rosbot_navigation
-pip install -r requirements.txt
-```
+*   **安全与效率奖励**
+    *   `--wall_proximity_penalty_k`: 对靠近墙壁或障碍物的行为施加惩罚，是保证安全的核心。
+    *   `--time_k`: 对每一步施加微小的负奖励，以鼓励智能体寻找更短的路径，提高效率。
 
-### 2. 配置Webots环境
+*   **行为平滑性与探索奖励**
+    *   `--angle_change_k`: 惩罚剧烈的转向动作，使轨迹更平滑、更符合物理规律。
+    *   `--early_spin_penalty_k`: 抑制在起点附近的原地打转行为，鼓励智能体快速开始有效探索。
+    *   `--front_clear_k`: 奖励前方开阔无障碍的区域，引导智能体向更安全的方向探索。
 
-确保ROSbot模型可在warehouse世界中正常运行：
-```bash
-webots warehouse/worlds/warehouse.wbt
-```
+### 3. 实验的可复现性与深度分析
 
-### 3. 第一阶段训练 - 基础模型
+我们高度重视实验的可复现性和结果分析的便捷性。
 
-为每种货物类型训练独立的基础模型：
+*   **MLflow 全方位追踪:** 训练脚本与 MLflow 深度集成。每次运行，不仅会自动记录所有超参数和性能指标，**甚至会将当前版本的训练脚本和整个 `src` 目录作为“物料” (Artifacts) 上传**。这保证了任何一次实验结果都具备完全的可追溯性和可复现性。
 
-```bash
-# 普通货物模型
-python scripts/train_stage1.py --cargo_type normal --total_steps 500000
+*   **轨迹可视化与数据导出:** 在每个回合结束后，系统会自动生成并保存一张包含机器人路径、奖励分布、起点、终点和障碍物布局的详细轨迹图。这些可视化结果对于调试和直观理解智能体行为至关重要。同时，原始轨迹数据也会被导出为 `.csv` 和 `.jsonl` 文件，便于进行更深入的离线数据分析。
 
-# 易碎品模型  
-python scripts/train_stage1.py --cargo_type fragile --total_steps 500000
+## 使用指南
 
-# 危险品模型
-python scripts/train_stage1.py --cargo_type dangerous --total_steps 500000
-```
+1.  **环境配置:**
+    ```bash
+    git clone <your-repo-url>
+    cd RL_car
+    pip install -r requirements.txt
+    ```
 
-### 4. 训练监控
+2.  **开始训练:**
+    我们提供了高度可配置的训练脚本 `train_single.py`。您可以直接运行以使用默认参数，或通过命令行进行深度定制。
 
-在浏览器中查看训练进度：
-```bash
-# MLflow实验追踪
-cd mlruns
-python -m mlflow ui --port 5000
+    *   **启动一次标准训练:**
+        ```bash
+        python rosbot_navigation/train_single.py
+        ```
 
-# TensorBoard训练曲线
-tensorboard --logdir ./logs/
-```
+    *   **高级训练示例 (微调与课程学习):**
+        以下示例展示了如何从一个预训练模型开始，针对 `dangerous` 货物类型进行微调，同时启用了我们设计的“阶段锁定”课程学习，并为本次运行指定了实验名称。
+        ```bash
+        python rosbot_navigation/train_single.py \
+            --experiment_name "FineTune-Dangerous-Cargo-V2" \
+            --leaner_name "TD3-FineTune-Run1" \
+            --cargo_type "dangerous" \
+            --total_steps 200000 \
+            --pretrained_model_path "/path/to/your/pretrained_model.zip" \
+            --learning_rate 1e-4 \
+            --enable_obstacle_curriculum true \
+            --lock_obstacles_per_stage true \
+            --draw_trajectory true
+        ```
 
-## 训练参数配置
+3.  **评估模型:**
+    使用 `test_model_webots.py` 脚本来加载并评估您训练好的模型。
+    ```bash
+    python rosbot_navigation/test_model_webots.py --model_path "/path/to/your/trained_model.zip"
+    ```
 
-修改 `config/training_config.yaml` 来配置训练参数：
 
-```yaml
-training:
-  base_params:
-    learning_rate: 0.0003
-    buffer_size: 500000
-    batch_size: 256
-    gamma: 0.99
-  
-  cargo_type_params:
-    fragile:
-      max_linear_velocity: 1.0
-      stability_penalty: -5.0
-```
+现在有以下几个工作：
+1.测试统计。要统计平均加速度和平均线速度，统计成功率，统计碰撞率。我想在测试时，碰撞后不结束，向后退一定距离再重新触发模型。
+2. 取货点手动操作车辆。在取货点为目的地时，将取货点目的地x-2作为目标点，在模型完成后，先将车辆转向对准目标点，移动到目标点，再转到正对的角度上，之后向前开两米。这个仅限于到达取货点。取货点作为出发点时，也先向前开两米，再使用模型控制。
+3. 接入手动控制。允许手动选择任务类型，即手动控制任务，用于图形化展示，与自动进行测试分开。
+4. 接入controller中的功能。 @simple_controller.py 根据该代码，@simple_controller.py#L279-280 把识别图像的功能和想后端发送数据的功能都添加到手动控制任务中。把键盘控制运动作为一个单独的模式也保存下来。自动测试时不需要识别和向后端发送数据。
 
-## 核心算法详解
+完成上述工作，并进行测试
 
-### AMCL定位算法
 
-使用800粒子的自适应蒙特卡洛定位：
-- **运动模型**: 轮速里程计 + 高斯噪声
-- **测量模型**: LiDAR扫描匹配 + 似然场方法
-- **自适应重采样**: 防止粒子枯竭
-- **不确定性估计**: 基于粒子分布计算
 
-### 改进TD3算法
+while not done:
+        with torch.no_grad():
+            action, _ = model.policy.predict(env._get_observation(), deterministic=deterministic)
 
-标准TD3算法的增强版本：
-- **鲁棒性增强**: Dropout + LayerNorm提升泛化能力
-- **特征提取器**: 专为42维状态空间设计的特征提取网络
-- **不确定性感知**: 根据AMCL置信度调整学习权重
-- **自适应奖励**: 基于货物类型的动态奖励机制
+        next_obs, reward, terminated, truncated, info = env.step(action)
 
-### 42维状态空间
+        # # 碰撞处理（依据 info['_last_collision_info']）
+        # collision_info = info.get('_last_collision_info')
+        # if collision_info:
+        #     collision_count += 1
+        #     print(f"💥 检测到碰撞! 第 {collision_count} 次. 开始执行后退操作...")
+        #     # 后退操作：发送负向速度指令
+        #     backup_speed = -5.0  # 后退速度
+        #     backup_duration_ms = 1000  # 后退持续时间 (ms)
+        #     backup_steps = int(backup_duration_ms / env.control_period_ms)
 
-详细分解：
+        #     for _ in range(backup_steps):
+        #         _set_raw_wheel_velocities(env, backup_speed, backup_speed)
+        #         env.robot.step(env.timestep)
+            
+        #     # 后退后停止
+        #     _set_raw_wheel_velocities(env, 0, 0)
+        #     env.robot.step(env.timestep)
+        #     print("后退完成，恢复模型控制.")
 
-1. **LiDAR感知 (0-19维)**: 
-   - 100°视野，20条均匀采样的激光射线
-   - 范围[0, 10m]，噪声建模
+        #     # 由于我们不希望碰撞终止episode，重置终止状态
+        #     # 注意：这会覆盖掉环境因碰撞返回的 terminated=True
+        #     terminated = False
 
-2. **AMCL定位结果 (20-31维)**:
-   - 位置估计 [x,y,z] × 2 (真实vs估计)
-   - 姿态估计 [roll,pitch,yaw] × 2
-   - 速度估计和加速度估计
+        steps += 1
+        total_reward += float(reward)
+        done = bool(terminated or truncated)
 
-3. **导航目标信息 (32-37维)**:
-   - 目标相对位置向量
-   - 起点位置（全局坐标）
-   - 终点位置（全局坐标）
+        # 若为取货点目的地：当到达接近点（x-2）时，执行手动停靠序列
+        if done:
+            dist_final, _ = env._calculate_distance_to_target()
+            success = dist_final < 0.3
+            if test_id in [1,2,3] and success:
+                try:
+                    env.task_info['target_pos']=target_pos
+                    done_2=False
+                    while not done_2:
+                        with torch.no_grad():
+                            action, _ = model.policy.predict(env._get_observation(), deterministic=deterministic)
 
-4. **航向控制 (38-41维)**:
-   - 当前航向偏差
-   - 目标航向角
-   - 角速度和角加速度
-
-### 不确定性课程学习
-
-渐进式训练策略：
-1. **初始阶段 (0-50k步)**: 低不确定性，建立基础能力
-2. **能力提升 (50-150k步)**: 中等不确定性，提高鲁棒性  
-3. **高级阶段 (150-300k步)**: 高不确定性，适应复杂情况
-4. **鲁棒性验证 (300-400k步)**: 极端不确定性，验证稳定性
-
-## 性能基准
-
-基于WebotsRLnav的改进结果：
-
-| 货物类型 | 成功率 | 平均步数 | 碰撞率 | 稳定性评分 |
-|----------|--------|----------|--------|------------|
-| 普通 | 90%+ | 65步 | <3% | 4.2/5 |
-| 易碎品 | 88%+ | 78步 | <2% | 4.6/5 |
-| 危险品 | 89%+ | 85步 | <1.5% | 4.8/5 |
-
-## 使用示例
-
-### 基础训练流程
-
-```python
-from rosbot_navigation.src.environments.navigation_env import ROSbotNavigationEnv
-from rosbot_navigation.src.models.td3_robust import ImprovedTD3
-
-# 创建环境
-env = ROSbotNavigationEnv(cargo_type='fragile')
-
-# 创建模型
-model = ImprovedTD3(
-    'MlpPolicy',
-    env,
-    tensorboard_log='./logs/'
-)
-
-# 训练
-model.learn(total_timesteps=500000)
-
-# 保存模型
-model.save('rosbot_fragile_navigation')
-```
-
-### AMCL定位使用
-
-```python
-from rosbot_navigation.src.localization.amcl_localizer import AMCLLocalizer
-
-# 创建AMCL定位器
-amcl = AMCLLocalizer(num_particles=800)
-
-# 初始化定位
-amcl.initialize_with_pose(initial_position=[0, 0, 0])
-
-# 执行定位
-pose = amcl.localize(lidar_scan, wheel_odometry)
-
-print(f"Position: {pose['position_estimated']}")
-print(f"Uncertainty: {pose['position_uncertainty']}")
-```
-
-## 后续规划
-
-### 第二阶段 - 模型微调（进行中）
-- [ ] 基于普通模型微调易碎品/危险品模型
-- [ ] 迁移学习实现
-- [ ] 模型压缩和优化
-
-### 第三阶段 - 部署和验证（待开发）
-- [ ] 实时推理优化
-- [ ] 多环境泛化能力测试
-- [ ] 仿真到现实迁移验证
-
-### 第四阶段 - 扩展功能（待规划）
-- [ ] 多机器人协同导航
-- [ ] 动态障碍物避障
-- [ ] 全局路径规划集成
-
-## 已知限制
-
-1. **Webots仿真局限**: 与真实机器人的动态特性存在差距
-2. **AMCL依赖**: 定位精度受限于粒子滤波的固有局限性
-3. **计算资源**: 800粒子AMCL + TD3训练需要较高计算资源
-4. **环境适应**: 需要针对新的仓储环境重新训练
+                        next_obs, reward, terminated, truncated, info = env.step(action)
+                        steps += 1
+                        total_reward += float(reward)
+                        done_2 = bool(terminated or truncated)
+                        if done_2:
+                            turn_to_angle(env, target_pos[2])
+                            env._send_wheel_velocities(0.0, 0.0)
+                            env.robot.step(env.timestep)
+                    # cur = np.array(env._get_sup_position(), dtype=float)
+                    # if np.linalg.norm(cur[:2] - approach_target[:2]) < 0.5:
+                    #     print("模型已到达接近点，切换到手动停靠序列...")
+                    #     # 1) 转向最终目标点
+                    #     angle_to_target = env._calculate_angle_to_target(target_pos)
+                    #     turn_to_angle(env, angle_to_target)
+                    #     # 2) 直行到最终目标
+                    #     cur_after_turn = np.array(env._get_sup_position(), dtype=float)
+                    #     dist_to_final = float(np.linalg.norm(target_pos[:2] - cur_after_turn[:2]))
+                    #     move_forward_distance(env, dist_to_final, speed=0.6)
+                    #     # 3) 转到正对的角度（这里采用 180°）
+                    #     turn_to_angle(env, target_pos[2])
+                    #     # # 4) 向前开两米
+                    #     # move_forward_distance(env, 2.0, speed=0.6)
+                    #     # 停止
+                    #     env._send_wheel_velocities(0.0, 0.0)
+                    #     env.robot.step(env.timestep)
+                    #     # 结束本回合并标记手动对接成功
+                    #     manual_docked = True
+                except Exception:
+                    raise

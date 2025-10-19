@@ -133,7 +133,7 @@ single_R4.6.3.5_w2_end2_Nor_20251005_183222
 
 
 
-#### Release 4.6.4
+#### Release 4.6.10
 基于 single_R4.6.3.9_W2E3_Nor_T5.7
 1. 使用0.5到达阈值
 2. 增大到达奖励到4000
@@ -168,12 +168,5 @@ T6.1: T6版本基础上，延长课程
 single_R4.6.10_W2E4_T6.1_normal_20251010_000759 
 single_R4.6.10_W2E4_T6.1_normal_20251009_221340
 
-
 T6：42000课表
 T7：2000到达奖励
-
-
-docker start rl-car-train
-conda activate rl_car
-cd /root/workspace/RL_car2/rosbot_navigation
-mlflow ui

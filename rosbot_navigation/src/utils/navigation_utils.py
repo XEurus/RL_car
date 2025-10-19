@@ -3,7 +3,7 @@
 """
 
 import numpy as np
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 import random
 import json
 from pathlib import Path
@@ -503,96 +503,41 @@ class NavigationTaskGenerator:
     def __init__(self, nav_utils: NavigationUtils):
         self.nav_utils = nav_utils
         self.task_pool = []
-        
-    def generate_training_tasks(self, cargo_type: str, num_tasks: int) -> List[Dict]:
-        """生成训练任务集"""
-        tasks = []
-        
-        base_tasks = self.nav_utils.navigation_config[cargo_type]
-        
-        for i in range(num_tasks):
-            # 基于基础任务生成变体
-            base_task = random.choice(base_tasks)
-            
-            # 添加小的随机扰动
-            perturbed_task = self._perturb_task(base_task, perturbation_range=0.5)
-            
-            tasks.append({
-                'task_id': i,
-                'cargo_type': cargo_type,
-                **perturbed_task,
-                'difficulty': random.choice(['easy', 'medium', 'hard'])
-            })
-        
-        return tasks
     
-    def generate_test_tasks(self, cargo_type: str, num_tasks: int) -> List[Dict]:
-        """生成测试任务集"""
-        tasks = self.generate_training_tasks(cargo_type, num_tasks)
-        
-        # 为测试任务增加难度评估
-        for task in tasks:
-            difficulty = self._assess_task_difficulty(
-                task['start_pos'], task['target_pos']
-            )
-            task['test_difficulty'] = difficulty
-        
-        return tasks
-    
-    def _perturb_task(self, base_task: Dict, perturbation_range: float) -> Dict:
-        """对任务添加随机扰动"""
-        return {
-            'start_pos': [
-                base_task['start_pos'][0] + random.uniform(-perturbation_range, perturbation_range),
-                base_task['start_pos'][1] + random.uniform(-perturbation_range, perturbation_range),
-                base_task['start_pos'][2]  # z坐标保持不变
-            ] if self.nav_utils.is_position_valid([
-                base_task['start_pos'][0] + random.uniform(-perturbation_range, perturbation_range),
-                base_task['start_pos'][1] + random.uniform(-perturbation_range, perturbation_range),
-                base_task['start_pos'][2]
-            ]) else base_task['start_pos'],
-            
-            'target_pos': [
-                base_task['target_pos'][0] + random.uniform(-perturbation_range, perturbation_range),
-                base_task['target_pos'][1] + random.uniform(-perturbation_range, perturbation_range),
-                base_task['target_pos'][2]
-            ] if self.nav_utils.is_position_valid([
-                base_task['target_pos'][0] + random.uniform(-perturbation_range, perturbation_range),
-                base_task['target_pos'][1] + random.uniform(-perturbation_range, perturbation_range),
-                base_task['target_pos'][2]
-            ]) else base_task['target_pos'],
-            
-            'description': base_task['description'] + ' (扰动后)'
+    def get_navigation_task_test(test_id:str):
+        """
+        返回:起点和终点坐标元组
+        """
+        fixed_positions = {
+            'start': [-5.0, 3.0, 0.0],       # 起点
+            'unload': [-5.0, -2.0, 0.0],     # 卸货点
+            'dangerous': [5.0, 3.0, 0.0],    # 危险货物点
+            'fragile': [5.0, 1.7, 0.0],      # 易碎货物点
+            'normal': [5.0, 0.2, 0.0],       # 普通货物点
         }
-    
-    def _assess_task_difficulty(self, start: List[float], target: List[float]) -> str:
-        """评估任务难度"""
-        distance = self.nav_utils.calculate_distance(start, target)
-        manhattan_distance = self.nav_utils.calculate_manhattan_distance(start, target)
+
+        if test_id == '1':
+            start_pos = fixed_positions['start']
+            target_pos = fixed_positions['normal']
         
-        # 基于距离评估
-        if distance < 5.0:
-            distance_difficulty = 'easy'
-        elif distance < 10.0:
-            distance_difficulty = 'medium'
-        else:
-            distance_difficulty = 'hard'
+        if test_id == '2':
+            start_pos = fixed_positions['start']
+            target_pos = fixed_positions['fragile']
         
-        # 基于转弯复杂度评估
-        start_heading = math.atan2(target[1] - start[1], target[0] - start[0])
-        complexity_score = abs(math.sin(start_heading)) * 2.0  # 垂直方向更复杂
+        if test_id == '3':
+            start_pos = fixed_positions['start']
+            target_pos = fixed_positions['dangerous']
         
-        if complexity_score < 0.5:
-            complexity_difficulty = 'easy'
-        elif complexity_score < 1.0:
-            complexity_difficulty = 'medium'
-        else:
-            complexity_difficulty = 'hard'
+        if test_id == '4':
+            start_pos = fixed_positions['normal']
+            target_pos = fixed_positions['unload']
         
-        # 综合难度
-        if distance_difficulty == 'easy' and complexity_difficulty == 'easy':
-            return 'easy'
-        elif distance_difficulty == 'hard' or complexity_difficulty == 'hard':
-            return 'hard'
-        else:
-            return 'medium'
+        if test_id == '5':
+            start_pos = fixed_positions['fragile']
+            target_pos = fixed_positions['unload']
+        
+        if test_id == '6':
+            start_pos = fixed_positions['dangerous']
+            target_pos = fixed_positions['unload']
+
+        return start_pos, target_pos

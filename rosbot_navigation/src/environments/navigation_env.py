@@ -455,7 +455,8 @@ class ROSbotNavigationEnv(gym.Env):
         self._debug(f"Apply curriculum params: stage={stage}, max_steps={self.max_steps_per_episode}, collision_th={self.collision_threshold}, success_th={self.success_threshold}")
     
     def _setup_sensors(self):
-        """初始化传感器设备"""
+        """初始化传感器设备"""        # 重置AMCL定位器
+        # self.amcl_localizer.reset()
     
         # LiDAR传感器 - 在proto文件中名称为"laser"
         self.lidar = self.supervisor.getDevice('laser')
@@ -534,13 +535,74 @@ class ROSbotNavigationEnv(gym.Env):
         self._prev_left_speed = 0.0
         self._prev_right_speed = 0.0
     
+    def test_reset(self, start_pose,target_pose, seed=None):
+        """重置环境和状态"""
+        super().reset(seed=seed)
+
+        self._angle_mode_on_reset = 'axis'
+        self.task_info['start_pos'] = np.array(start_pose, dtype=np.float32)
+        self.task_info['target_pos'] = np.array(target_pose, dtype=np.float32)
+        self._reset_robot_position(start_pose)
+
+        # 重置状态缓存
+        self._reset_state_buffer()
+        # 重置轨迹记录
+        self.trajectory = []
+        self.min_obstacle_distance = float('inf')
+        
+        # 初始化速度变量，用于平滑控制
+        self.last_linear_vel = 0.0
+        self.last_angular_vel = 0.0
+        self._last_cmd_linear_vel = 0.0
+        self._last_cmd_angular_vel = 0.0
+        self.spin_steps = 0
+        self.no_progress_steps = 0
+        self.last_distance_to_target = None
+        self._stuck = False
+        self.episode_steps = 0
+
+        # 重置奖励函数状态
+        _pos = self._get_sup_position()
+        _orient = self._get_sup_orientation()
+        self.reward_functions.reset(_pos, _orient)
+        
+        # 重置终止标志
+        self._reward_terminate_flag = False
+        
+        # 如果电机存在，重置电机速度为0
+        if hasattr(self, 'fl_motor') and self.fl_motor:
+            self.fl_motor.setVelocity(0.0)
+        if hasattr(self, 'fr_motor') and self.fr_motor:
+            self.fr_motor.setVelocity(0.0)
+        if hasattr(self, 'rl_motor') and self.rl_motor:
+            self.rl_motor.setVelocity(0.0)
+        if hasattr(self, 'rr_motor') and self.rr_motor:
+            self.rr_motor.setVelocity(0.0)
+        
+        # 等待一小段时间，确保机器人完全停止
+        # 增加等待时间，确保初始化完全
+        for _ in range(5):
+            self.supervisor.step(self.timestep)
+        
+        # 机器人初始朝向目标 (可选，按课程阶段角度模式)
+        if hasattr(self, '_rotate_to_target_on_reset') and self._rotate_to_target_on_reset:
+            angle_mode = getattr(self, '_angle_mode_on_reset', 'axis')
+            if angle_mode == 'align':
+                self._rotate_to_target_exact()
+            elif angle_mode == 'random':
+                self._set_random_yaw()
+            elif angle_mode == 'exact_noise':
+                self._rotate_to_target_exact_noise()
+            else:
+                # 'axis' 模式：使用简化到主方向
+                self._rotate_to_target()
+
     def reset(self, seed=None, options=None):
         """重置环境和状态"""
         super().reset(seed=seed)
         
         # 设置新的导航任务
         self._set_navigation_task()
-        
         # 重置AMCL定位器
         # self.amcl_localizer.reset()
         
@@ -616,6 +678,7 @@ class ROSbotNavigationEnv(gym.Env):
         
         # 仅返回 Gymnasium 规范的二元组
         return observation, info
+
     
     def _debug(self, msg: str):
         """条件调试输出"""
@@ -756,7 +819,7 @@ class ROSbotNavigationEnv(gym.Env):
         data,_ = self._get_lidar_data()
         return data if isinstance(data, np.ndarray) else np.array(data, dtype=np.float32)
     
-    def _set_navigation_task(self):
+    def _set_navigation_task(self,test_id = None):
         """设置导航任务（集成课程学习阶段）"""
         if self.training_mode == 'horizontal_curriculum':
             start_pos, target_pos, angle_mode = self.nav_utils.get_curriculum_task()
@@ -771,10 +834,9 @@ class ROSbotNavigationEnv(gym.Env):
         
         self.task_info['start_pos'] = np.array(start_pos, dtype=np.float32)
         self.task_info['target_pos'] = np.array(target_pos, dtype=np.float32)
-        
-        # 重置机器人位置
         self._reset_robot_position(start_pos)
-    
+                
+
     def _randomize_obstacles(self):
         """障碍物随机化：委托到 navigation_env_obstacles 模块实现。"""
         try:
@@ -809,7 +871,7 @@ class ROSbotNavigationEnv(gym.Env):
                 self.supervisor.step(self.timestep)
                 
     def _rotate_to_target(self):
-        """将机器人朝向目标位置 - 使用电机控制自然旋转"""
+        """将机器人朝向目标位置"""
         if self.robot_node and 'target_pos' in self.task_info:
             # 获取当前位置和目标位置
             current_pos = self._get_sup_position()
@@ -982,38 +1044,6 @@ class ROSbotNavigationEnv(gym.Env):
             'previous_time': current_time
         }
     
-    def _initialize_amcl_state(self):
-        """初始化AMCL状态"""
-        # 获取初始LiDAR数据
-        lidar_data = self._get_lidar_data()
-        
-        # 获取初始里程计数据
-        odometry_data = self._get_odometry_data()
-        
-        # 初始化AMCL
-        try:
-            self.amcl_localizer.initialize_with_pose(
-                self.task_info['start_pos'],
-                [0.0, 0.0, 0.0]  # 初始朝向0
-            )
-            
-            # 执行初始定位
-            result = self.amcl_localizer.localize(lidar_data, odometry_data)
-            if result is not None and isinstance(result, dict):
-                # 确保所有必要的键都存在
-                required_keys = ['position_estimated', 'orientation_estimated', 'velocity_estimated']
-                if all(key in result for key in required_keys):
-                    self.amcl_result = result
-        except Exception as e:
-            print(f"AMCL初始化失败: {e}")
-            # 使用默认值
-            self.amcl_result = {
-                'position_estimated': self.task_info['start_pos'].copy(),
-                'orientation_estimated': np.array([0.0, 0.0, 0.0]),
-                'velocity_estimated': np.zeros(3),
-                'position_uncertainty': 0.1
-            }
-    
     def _execute_action(self, action):
         """执行动作"""
         # 防御式：将动作中的 NaN/Inf 替换为 0，并限定范围
@@ -1025,34 +1055,6 @@ class ROSbotNavigationEnv(gym.Env):
         if action.size < 2:
             action = np.pad(action, (0, max(0, 2 - action.size)), constant_values=0.0)
         action = np.nan_to_num(action, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # 预测性碰撞避免
-        # if action[0] > 0.3:  # 如果试图显著前进
-        #     lidar_features = self._get_lidar_features()
-        #     if len(lidar_features) > 0:
-        #         # 查看前方激光雷达读数
-        #         center_index = len(lidar_features) // 2
-        #         ray_span = 3  # 中心两侧各3束光线
-        #         front_indices = range(max(0, center_index - ray_span), 
-        #                             min(len(lidar_features), center_index + ray_span + 1))
-        #         front_distances = [lidar_features[i] for i in front_indices]
-        #         min_front_distance = min(front_distances) if front_distances else 1.0
-                
-        #         # # 如果前方太靠近障碍物，阻止前进动作
-        #         # if min_front_distance <= 0.085:  # 8.5cm阈值
-        #         #     action = [0.0, action[1]]  # 只允许旋转
-        #         #     print(f"⚠️  预测性避障: 前方{min_front_distance:.3f}m，阻止前进")
-
-        #         # 不阻止前进，但如果前方距离过近，给予惩罚信号
-        #         if min_front_distance <= 0.085:  # 8.5cm阈值
-        #             # 设置惩罚标志，供奖励函数读取
-        #             self._predictive_obstacle_penalty = True
-        #             # 可选：打印调试信息
-        #             # print(f"⚠️  预测性避障惩罚: 前方{min_front_distance:.3f}m，给予惩罚")
-        #         else:
-        #             self._predictive_obstacle_penalty = False
-        # else:
-        #     self._predictive_obstacle_penalty = False
         
         max_motor_speed = getattr(self, 'max_motor_speed', 26.0)
         wheel_radius = getattr(self, 'wheel_radius', 0.043)
@@ -1520,89 +1522,89 @@ class ROSbotNavigationEnv(gym.Env):
         except Exception:
             pass
 
-        # 简化：固定频率检查接触点，避免漏检（每步最多检查一次）
-        should_check_contacts = True
-        try:
-            # 防止同一时间步重复查询
-            if (self._global_step - self._last_contact_check_step) < 1:
-                should_check_contacts = False
-        except Exception:
-            should_check_contacts = True
+        # # 简化：固定频率检查接触点，避免漏检（每步最多检查一次）
+        # should_check_contacts = True
+        # try:
+        #     # 防止同一时间步重复查询
+        #     if (self._global_step - self._last_contact_check_step) < 1:
+        #         should_check_contacts = False
+        # except Exception:
+        #     should_check_contacts = True
 
-        # 1. selfCollision检测 (Webots) - 仅在触发条件满足时进行昂贵查询
-        if should_check_contacts and self.robot_node:
-            try:
-                contact_points = self.robot_node.getContactPoints(includeDescendants=True)
-                self._last_contact_check_step = self._global_step
-                for cp in contact_points:
-                    other_node_id = cp.getNodeId()
-                    contact_z_height = cp.getPoint()[2]
-                    other_node = self.supervisor.getFromId(other_node_id)
-                    if other_node is None:
-                        continue
-                    other_node_name = ""
-                    name_field = other_node.getField("name")
-                    if name_field:
-                        other_node_name = name_field.getSFString()
-                    # 若缺省名称，尝试使用 DEF 名称作为回退
-                    if not other_node_name:
-                        try:
-                            other_node_name = other_node.getDef() or ""
-                        except Exception:
-                            other_node_name = ""
-                    # 正常车轮-地面接触判定（名称统一为小写比较）
-                    other_label = other_node_name.strip().lower()
-                    ground_set = set(s.strip().lower() for s in getattr(self, 'ground_defs', {'floor'}))
-                    is_ground_contact = other_label in ground_set
-                    # 放宽地面高度容差，避免由于数值抖动导致误判
-                    is_at_floor_level = abs(contact_z_height) < 0.02
-                    if is_ground_contact and is_at_floor_level:
-                        continue
-                    # 其余接触一律视为碰撞
-                    try:
-                        self._last_collision_info = {
-                            'type': 'contact_point',
-                            'node': other_label,
-                            'z': float(contact_z_height),
-                            'step': int(self._global_step)
-                        }
-                    except Exception:
-                        self._last_collision_info = {'type': 'contact_point'}
-                    collision_detected = True
-                    break
-            except Exception as e:
-                # 静默或降频打印
-                # print(f"通过getContactPoints检测碰撞时发生错误: {e}")
-                pass
+        # # 1. selfCollision检测 (Webots) - 仅在触发条件满足时进行昂贵查询
+        # if should_check_contacts and self.robot_node:
+        #     try:
+        #         contact_points = self.robot_node.getContactPoints(includeDescendants=True)
+        #         self._last_contact_check_step = self._global_step
+        #         for cp in contact_points:
+        #             other_node_id = cp.getNodeId()
+        #             contact_z_height = cp.getPoint()[2]
+        #             other_node = self.supervisor.getFromId(other_node_id)
+        #             if other_node is None:
+        #                 continue
+        #             other_node_name = ""
+        #             name_field = other_node.getField("name")
+        #             if name_field:
+        #                 other_node_name = name_field.getSFString()
+        #             # 若缺省名称，尝试使用 DEF 名称作为回退
+        #             if not other_node_name:
+        #                 try:
+        #                     other_node_name = other_node.getDef() or ""
+        #                 except Exception:
+        #                     other_node_name = ""
+        #             # 正常车轮-地面接触判定（名称统一为小写比较）
+        #             other_label = other_node_name.strip().lower()
+        #             ground_set = set(s.strip().lower() for s in getattr(self, 'ground_defs', {'floor'}))
+        #             is_ground_contact = other_label in ground_set
+        #             # 放宽地面高度容差，避免由于数值抖动导致误判
+        #             is_at_floor_level = abs(contact_z_height) < 0.02
+        #             if is_ground_contact and is_at_floor_level:
+        #                 continue
+        #             # 其余接触一律视为碰撞
+        #             try:
+        #                 self._last_collision_info = {
+        #                     'type': 'contact_point',
+        #                     'node': other_label,
+        #                     'z': float(contact_z_height),
+        #                     'step': int(self._global_step)
+        #                 }
+        #             except Exception:
+        #                 self._last_collision_info = {'type': 'contact_point'}
+        #             collision_detected = True
+        #             break
+        #     except Exception as e:
+        #         # 静默或降频打印
+        #         # print(f"通过getContactPoints检测碰撞时发生错误: {e}")
+        #         pass
 
-        # 回退：若接触点未检测到碰撞，使用距离传感器阈值作为补充
-        if not collision_detected:
-            try:
-                threshold = getattr(self, 'collision_distance_threshold', 0.05)
-                for sensor in getattr(self, 'collision_sensors', []) or []:
-                    value = sensor.getValue()
-                    if value is not None and value < threshold:
-                        try:
-                            self._last_collision_info = {
-                                'type': 'proximity',
-                                'sensor': getattr(sensor, 'getName', lambda: 'unknown')(),
-                                'value': float(value),
-                                'threshold': float(threshold),
-                                'step': int(self._global_step)
-                            }
-                        except Exception:
-                            self._last_collision_info = {'type': 'proximity'}
-                        collision_detected = True
-                        break
-            except Exception:
-                pass
+        # # 回退：若接触点未检测到碰撞，使用距离传感器阈值作为补充
+        # if not collision_detected:
+        #     try:
+        #         threshold = getattr(self, 'collision_distance_threshold', 0.05)
+        #         for sensor in getattr(self, 'collision_sensors', []) or []:
+        #             value = sensor.getValue()
+        #             if value is not None and value < threshold:
+        #                 try:
+        #                     self._last_collision_info = {
+        #                         'type': 'proximity',
+        #                         'sensor': getattr(sensor, 'getName', lambda: 'unknown')(),
+        #                         'value': float(value),
+        #                         'threshold': float(threshold),
+        #                         'step': int(self._global_step)
+        #                     }
+        #                 except Exception:
+        #                     self._last_collision_info = {'type': 'proximity'}
+        #                 collision_detected = True
+        #                 break
+        #     except Exception:
+        #         pass
 
-        if collision_detected:
-            try:
-                self._debug(f"termination: collision detected, info={getattr(self, '_last_collision_info', None)}")
-            except Exception:
-                pass
-            return True
+        # if collision_detected:
+        #     try:
+        #         self._debug(f"termination: collision detected, info={getattr(self, '_last_collision_info', None)}")
+        #     except Exception:
+        #         pass
+        #     return True
         
         # 2. 到达目标
         current_pos = self._get_sup_position()
@@ -1665,7 +1667,8 @@ class ROSbotNavigationEnv(gym.Env):
             'very_close_to_target': distance_to_target < 0.25,  # 非常接近目标
             'success': distance_to_target < self.success_threshold,  # 目标成功标志（按课程参数第三项）
             'cargo_type': self.cargo_type,
-            'last_collision': getattr(self, '_last_collision_info', None)
+            'last_collision': getattr(self, '_last_collision_info', None),
+            'collision': self._detect_collision_simple
         }
         # 合并奖励函数传回的步级统计指标
         try:
@@ -1734,10 +1737,6 @@ class ROSbotNavigationEnv(gym.Env):
             pass
 
         return False
-    
-    def get_amcl_uncertainty(self):
-        """获取AMCL定位不确定性"""
-        return 0.0 # self.amcl_localizer.get_current_uncertainty()
     
     def get_current_pose(self):
         """获取当前位姿"""
