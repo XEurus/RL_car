@@ -1,20 +1,16 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
+*.monitor.csv
 *.py[cod]
 *$py.class
-results/
-*.csv
-# mlflow
-*.zip
 mlruns/
 mlruns_test/
 logs/
 results/
-暂存/
 test_logs/
 test_results/
 debug_logs/
-models/
+debug_plots/
 
 # IDE specific files
 .vscode/
